@@ -1,5 +1,5 @@
-use crate::data_structures::Caches;
 use async_trait::async_trait;
+use crate::data_structures::Caches;
 
 #[async_trait]
 pub trait Interface {
