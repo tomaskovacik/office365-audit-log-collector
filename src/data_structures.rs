@@ -19,6 +19,7 @@ pub struct Caches {
     pub exchange: JsonList,
     pub sharepoint: JsonList,
     pub dlp: JsonList,
+    pub ual_graph: JsonList,
     pub size: usize,
 }
 impl Caches {
@@ -28,7 +29,8 @@ impl Caches {
             + self.aad.len()
             + self.exchange.len()
             + self.sharepoint.len()
-            + self.dlp.len();
+            + self.dlp.len()
+            + self.ual_graph.len();
         size >= self.size
     }
 
@@ -44,27 +46,30 @@ impl Caches {
             "Audit.Exchange" => self.exchange.push(log),
             "Audit.SharePoint" => self.sharepoint.push(log),
             "DLP.All" => self.dlp.push(log),
+            "UALGraph" => self.ual_graph.push(log),
             _ => warn!("Unknown content type cached: {}", content_type),
         }
     }
 
-    pub fn get_all_types(&self) -> [(String, &JsonList); 5] {
+    pub fn get_all_types(&self) -> [(String, &JsonList); 6] {
         [
             ("Audit.General".to_string(), &self.general),
             ("Audit.AzureActiveDirectory".to_string(), &self.aad),
             ("Audit.Exchange".to_string(), &self.exchange),
             ("Audit.SharePoint".to_string(), &self.sharepoint),
-            ("DLP.All".to_string(), &self.dlp)
+            ("DLP.All".to_string(), &self.dlp),
+            ("UALGraph".to_string(), &self.ual_graph)
         ]
     }
 
-    pub fn get_all(&mut self) -> [&mut JsonList; 5] {
+    pub fn get_all(&mut self) -> [&mut JsonList; 6] {
         [
             &mut self.general,
             &mut self.aad,
             &mut self.exchange,
             &mut self.sharepoint,
-            &mut self.dlp
+            &mut self.dlp,
+            &mut self.ual_graph
         ]
     }
 }
@@ -186,4 +191,20 @@ pub struct CliArgs {
 
     #[arg(short, long, required = false, help = "Interactive interface for (load) testing.")]
     pub interactive: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+    use crate::data_structures::{ArbitraryJson, Caches};
+
+    #[test]
+    fn caches_ual_graph_logs() {
+        let mut cache = Caches::new(100);
+        let mut log = ArbitraryJson::new();
+        log.insert("id".to_string(), Value::String("abc".to_string()));
+        cache.insert(log, &"UALGraph".to_string());
+        assert_eq!(cache.ual_graph.len(), 1);
+        assert_eq!(cache.get_all_types().len(), 6);
+    }
 }

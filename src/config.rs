@@ -158,9 +158,11 @@ pub struct ContentTypesSubConfig {
     pub share_point: Option<bool>,
     #[serde(rename = "DLP.All")]
     pub dlp: Option<bool>,
+    #[serde(rename = "Audit.UALGraph")]
+    pub ual_graph: Option<bool>,
 }
 impl ContentTypesSubConfig {
-    pub fn get_content_type_strings(&self) -> Vec<String> {
+    pub fn get_management_content_type_strings(&self) -> Vec<String> {
         let mut results = Vec::new();
         if self.general.unwrap_or(false) {
             results.push("Audit.General".to_string())
@@ -179,6 +181,18 @@ impl ContentTypesSubConfig {
         }
         results
     }
+
+    pub fn graph_ual_enabled(&self) -> bool {
+        self.ual_graph.unwrap_or(false)
+    }
+
+    pub fn get_content_type_strings(&self) -> Vec<String> {
+        let mut results = self.get_management_content_type_strings();
+        if self.graph_ual_enabled() {
+            results.push("UALGraph".to_string());
+        }
+        results
+    }
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -193,6 +207,8 @@ pub struct FilterSubConfig {
     pub share_point: Option<ArbitraryJson>,
     #[serde(rename = "DLP.All")]
     pub dlp: Option<ArbitraryJson>,
+    #[serde(rename = "Audit.UALGraph")]
+    pub ual_graph: Option<ArbitraryJson>,
 }
 impl FilterSubConfig {
     pub fn get_filters(&self) -> HashMap<String, ArbitraryJson> {
@@ -212,6 +228,9 @@ impl FilterSubConfig {
         }
         if let Some(filter) = self.dlp.as_ref() {
             results.insert("DLP.All".to_string(), filter.clone());
+        }
+        if let Some(filter) = self.ual_graph.as_ref() {
+            results.insert("UALGraph".to_string(), filter.clone());
         }
         results
     }
@@ -253,4 +272,26 @@ pub struct FluentdOutputSubConfig {
 pub struct OmsOutputSubConfig {
     #[serde(rename = "workspaceId")]
     pub workspace_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::ContentTypesSubConfig;
+
+    #[test]
+    fn includes_graph_content_type_when_enabled() {
+        let content_types = ContentTypesSubConfig {
+            general: Some(true),
+            azure_active_directory: None,
+            exchange: None,
+            share_point: None,
+            dlp: None,
+            ual_graph: Some(true),
+        };
+
+        assert_eq!(content_types.get_content_type_strings(),
+                   vec!["Audit.General".to_string(), "UALGraph".to_string()]);
+        assert_eq!(content_types.get_management_content_type_strings(),
+                   vec!["Audit.General".to_string()]);
+    }
 }

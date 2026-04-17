@@ -1,0 +1,247 @@
+use crate::data_structures::{ArbitraryJson, AuthResult, CliArgs};
+use anyhow::{anyhow, Result};
+use chrono::{DateTime, Utc};
+use log::{error, info, warn};
+use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::time::Duration;
+use tokio::time::sleep;
+
+const POLL_INTERVAL_SECS: u64 = 2;
+const POLL_ATTEMPTS: usize = 60;
+const DEFAULT_EXPIRATION_DAYS: i64 = 30;
+
+#[derive(Clone)]
+pub struct GraphUALConnection {
+    pub args: CliArgs,
+    pub headers: HeaderMap,
+}
+
+#[derive(Clone)]
+pub struct GraphLogRecord {
+    pub content_id: String,
+    pub expiration: String,
+    pub log: ArbitraryJson,
+}
+
+pub async fn get_graph_connection(args: CliArgs) -> Result<GraphUALConnection> {
+    let mut api = GraphUALConnection {
+        args,
+        headers: HeaderMap::new(),
+    };
+    api.login().await?;
+    Ok(api)
+}
+
+impl GraphUALConnection {
+    pub async fn login(&mut self) -> Result<()> {
+        info!("Logging in to Microsoft Graph API.");
+        let auth_url = format!(
+            "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+            self.args.tenant_id
+        );
+        let scope = "https://graph.microsoft.com/.default";
+        let params = [
+            ("grant_type", "client_credentials"),
+            ("client_id", &self.args.client_id),
+            ("client_secret", &self.args.secret_key),
+            ("scope", scope),
+        ];
+        self.headers.insert(
+            CONTENT_TYPE,
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+        let login_client = reqwest::Client::new();
+        let response = login_client
+            .post(auth_url)
+            .headers(self.headers.clone())
+            .form(&params)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let text = response.text().await?;
+            let msg = format!("Received error response to Graph API login: {}", text);
+            error!("{}", msg);
+            return Err(anyhow!("{}", msg));
+        }
+        let json = response.json::<AuthResult>().await?;
+        let token = format!("bearer {}", json.access_token);
+        self.headers.insert(AUTHORIZATION, token.parse().unwrap());
+        info!("Successfully logged in to Microsoft Graph API.");
+        Ok(())
+    }
+
+    pub async fn collect_logs(
+        &self,
+        runs: &Vec<(String, String)>,
+        known_blobs: &HashMap<String, String>,
+        skip_known_logs: bool,
+    ) -> Result<Vec<GraphLogRecord>> {
+        let mut collected = Vec::new();
+        for (start_time, end_time) in runs {
+            let query_id = self.start_query(start_time, end_time).await?;
+            self.wait_for_query_completion(&query_id).await?;
+            let mut query_logs = self
+                .get_query_records(&query_id, known_blobs, skip_known_logs)
+                .await?;
+            collected.append(&mut query_logs);
+        }
+        Ok(collected)
+    }
+
+    async fn start_query(&self, start_time: &str, end_time: &str) -> Result<String> {
+        let url = "https://graph.microsoft.com/beta/security/auditLog/queries";
+        let body = json!({
+            "displayName": format!("GraphUALCollector-{}-{}", start_time, end_time),
+            "filterStartDateTime": start_time,
+            "filterEndDateTime": end_time
+        });
+        let response = reqwest::Client::new()
+            .post(url)
+            .headers(self.headers.clone())
+            .json(&body)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let text = response.text().await?;
+            return Err(anyhow!("Graph UAL query start failed: {}", text));
+        }
+        let json = response.json::<Value>().await?;
+        let query_id = json
+            .get("id")
+            .and_then(|id| id.as_str())
+            .ok_or_else(|| anyhow!("Graph UAL query did not return an id"))?;
+        Ok(query_id.to_string())
+    }
+
+    async fn wait_for_query_completion(&self, query_id: &str) -> Result<()> {
+        let url = format!(
+            "https://graph.microsoft.com/beta/security/auditLog/queries/{}",
+            query_id
+        );
+        for _ in 0..POLL_ATTEMPTS {
+            let response = reqwest::Client::new()
+                .get(url.clone())
+                .headers(self.headers.clone())
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                let text = response.text().await?;
+                return Err(anyhow!("Graph UAL query status request failed: {}", text));
+            }
+            let json = response.json::<Value>().await?;
+            let status = json
+                .get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if status == "succeeded" {
+                return Ok(());
+            }
+            if status == "failed" || status == "cancelled" {
+                return Err(anyhow!("Graph UAL query failed for id {}", query_id));
+            }
+            sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
+        }
+        Err(anyhow!("Graph UAL query timed out for id {}", query_id))
+    }
+
+    async fn get_query_records(
+        &self,
+        query_id: &str,
+        known_blobs: &HashMap<String, String>,
+        skip_known_logs: bool,
+    ) -> Result<Vec<GraphLogRecord>> {
+        let mut next_page = Some(format!(
+            "https://graph.microsoft.com/beta/security/auditLog/queries/{}/records",
+            query_id
+        ));
+        let mut results = Vec::new();
+
+        while let Some(url) = next_page {
+            let response = reqwest::Client::new()
+                .get(url.clone())
+                .headers(self.headers.clone())
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                let text = response.text().await?;
+                return Err(anyhow!("Graph UAL records request failed: {}", text));
+            }
+            let json = response.json::<Value>().await?;
+            let records = json
+                .get("value")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            for record in records {
+                let map = record.as_object().cloned();
+                if map.is_none() {
+                    warn!("Graph UAL record was not an object, skipping.");
+                    continue;
+                }
+                let mut log: ArbitraryJson = map.unwrap().into_iter().collect();
+                normalize_creation_time(&mut log);
+                let content_id = get_graph_record_id(&log);
+                if skip_known_logs && known_blobs.contains_key(&content_id) {
+                    continue;
+                }
+                let expiration = (Utc::now() + chrono::Duration::try_days(DEFAULT_EXPIRATION_DAYS).unwrap())
+                    .format("%Y-%m-%dT%H:%M:%S.%fZ")
+                    .to_string();
+                results.push(GraphLogRecord {
+                    content_id,
+                    expiration,
+                    log,
+                });
+            }
+            next_page = json
+                .get("@odata.nextLink")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string());
+        }
+        Ok(results)
+    }
+}
+
+fn get_graph_record_id(log: &ArbitraryJson) -> String {
+    let maybe_id = ["id", "recordId", "eventId"]
+        .iter()
+        .find_map(|field| log.get(*field).and_then(|v| v.as_str()));
+    if let Some(id) = maybe_id {
+        return id.to_string();
+    }
+    let fallback_time = log
+        .get("createdDateTime")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    format!(
+        "UALGraph-{}-{}",
+        fallback_time,
+        Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    )
+}
+
+fn normalize_creation_time(log: &mut ArbitraryJson) {
+    if log.contains_key("CreationTime") {
+        return;
+    }
+    let timestamp = ["createdDateTime", "activityDateTime", "eventDateTime"]
+        .iter()
+        .find_map(|field| log.get(*field).and_then(|v| v.as_str()));
+    if let Some(ts) = timestamp {
+        if let Ok(parsed) = DateTime::parse_from_rfc3339(ts) {
+            log.insert(
+                "CreationTime".to_string(),
+                Value::String(
+                    parsed
+                        .with_timezone(&Utc)
+                        .format("%Y-%m-%dT%H:%M:%S")
+                        .to_string(),
+                ),
+            );
+        }
+    }
+}
