@@ -9,6 +9,7 @@ collect:  # Settings determining which audit logs to collect and how to do it
     Audit.Exchange: True
     Audit.SharePoint: True
     DLP.All: True
+    Audit.UALGraph: False
   cacheSize: 500000  # Amount of logs to cache/batch until outputting, larger=faster but eats more memory
   maxThreads: 50  # Maximum number of simultaneous threads retrieving logs
   globalTimeout: 1  # Number of minutes before the process is forced to exit if still running (0 = no timeout). If you run e.g. every hour you could set this to 59, ensuring there will only be 1 active process.
@@ -22,6 +23,7 @@ collect:  # Settings determining which audit logs to collect and how to do it
     Audit.Exchange:
     Audit.SharePoint:
     DLP.All:
+    Audit.UALGraph:
 output:  # Make sure to remove or comment out all outputs you do not intend to use
   file:  # CSV output
     enabled: False

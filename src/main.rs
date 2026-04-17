@@ -10,6 +10,7 @@ use crate::interactive_mode::interactive;
 
 mod collector;
 mod api_connection;
+mod api_connection_graph;
 mod data_structures;
 mod config;
 mod interfaces;
@@ -94,4 +95,3 @@ impl Log for InteractiveLogger {
     }
     fn flush(&self) {}
 }
-

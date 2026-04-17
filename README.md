@@ -53,6 +53,7 @@ If you have any issues or questions, or requests for additional interfaces, feel
   - Audit.Exchange
   - Audit.SharePoint
   - DLP.All
+  - Audit.UALGraph (Microsoft Graph beta)
 - The following outputs are supported:
   - Graylog (or any other source that accepts a simple socket connection)
   - Fluentd
@@ -89,6 +90,12 @@ See the following link for more info on the management APIs: https://msdn.micros
     - Check 'ActivityFeed.Read'
     - Check 'ActivityFeed.ReadDlp'
     - Hit 'Add permissions'
+- If you want to enable `Audit.UALGraph`, also grant Microsoft Graph application permissions:
+  - Azure AD > 'App registrations' > Click your new app registration > 'API permissions' > 'Add permissions' > 'Microsoft Graph' > 'Application permissions'
+    - Check `AuditLogsQuery.Read.All`
+    - Check `AuditLogs.Read.All`
+    - Hit 'Add permissions'
+  - Click "Grant admin consent" for the tenant
 - You can now run the collector and retrieve logs. 
 
 
@@ -129,6 +136,16 @@ OfficeAuditLogCollector(.exe) --tenant-id %tenant_id% --client-id %client_key% -
 To create a config file you can start with the 'fullConfig.yaml' from the ConfigExamples folder. This has all the 
 possible options and some explanatory comments. Cross-reference with a config example using the output(s) of your choice, and you
 should be set. Remember to remove (or comment out) all the outputs you do not intent to use.
+
+### Enabling Unified Audit Log via Microsoft Graph (beta)
+
+- Set `collect.contentTypes.Audit.UALGraph: True` in your config.
+- You can combine it with Office Management API content types in the same run.
+- Output interfaces need no special changes; records are exported under content type `UALGraph`.
+- A ready example config is available at `Release/ConfigExamples/ualGraph.yaml`.
+
+Note: Graph UAL is a beta endpoint and can change behavior or schema without notice. The collector normalizes
+`CreationTime` from Graph timestamps when possible so existing outputs keep working.
 
 You can schedule to run the executable with CRON or Task Scheduler.
 

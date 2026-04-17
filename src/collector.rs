@@ -16,6 +16,7 @@ use tokio::time::sleep;
 use crate::data_structures;
 use crate::api_connection;
 use crate::api_connection::ApiConnection;
+use crate::api_connection_graph::{self, GraphLogRecord};
 use crate::config::{Config, ContentTypesSubConfig};
 use crate::data_structures::{ArbitraryJson, Caches, CliArgs, ContentToRetrieve, JsonList, RunState};
 use crate::interfaces::azure_oms_interface::OmsInterface;
@@ -44,6 +45,7 @@ pub struct Collector {
     saved: usize,
     cache: Caches,
     filters: HashMap<String, ArbitraryJson>,
+    graph_logs: Vec<GraphLogRecord>,
 }
 
 impl Collector {
@@ -79,6 +81,18 @@ impl Collector {
         api.subscribe_to_feeds().await?;
 
         let known_blobs = config.load_known_blobs();
+        let mut graph_logs = Vec::new();
+        if config.collect.content_types.graph_ual_enabled() {
+            info!("Retrieving Unified Audit Logs from Microsoft Graph API.");
+            let graph_connection = api_connection_graph::get_graph_connection(args.clone()).await?;
+            let graph_runs = runs.get("UALGraph").cloned().unwrap_or_default();
+            graph_logs = graph_connection.collect_logs(
+                &graph_runs,
+                &known_blobs,
+                config.collect.skip_known_logs.unwrap_or(true))
+                .await?;
+            info!("Retrieved {} Unified Audit Logs from Graph API.", graph_logs.len());
+        }
         let (result_rx, stats_rx, kill_tx) =
             get_available_content(api,
                                   config.collect.content_types,
@@ -105,7 +119,8 @@ impl Collector {
             saved: 0,
             kill_tx,
             filters,
-            cache
+            cache,
+            graph_logs,
         };
         Ok(collector)
     }
@@ -115,6 +130,7 @@ impl Collector {
     pub async fn monitor(&mut self) {
 
         let start = Instant::now();
+        self.process_graph_logs().await;
         loop {
             if let Some(timeout) = self.config.collect.global_timeout {
                 if timeout > 0 && start.elapsed().as_secs().div(60) as usize >= timeout {
@@ -188,6 +204,20 @@ impl Collector {
         self.saved += 1;
         if self.cache.full() {
             self.output().await;
+        }
+    }
+
+    async fn process_graph_logs(&mut self) {
+        let graph_logs = std::mem::take(&mut self.graph_logs);
+        for graph_log in graph_logs {
+            self.known_blobs.insert(graph_log.content_id.clone(), graph_log.expiration.clone());
+            let graph_content = ContentToRetrieve {
+                content_type: "UALGraph".to_string(),
+                content_id: graph_log.content_id,
+                expiration: graph_log.expiration,
+                url: "graph://security/auditLog/queries".to_string(),
+            };
+            self.handle_log(graph_log.log, &graph_content).await;
         }
     }
     pub async fn check_stats(&mut self) -> bool {
@@ -395,6 +425,9 @@ pub async fn message_loop(mut config: data_structures::MessageLoopConfig,
     let mut retry_map = HashMap::new();
     // Loop ends with the run itself, signalling the program is done.
     loop {
+        if check_done(&mut state).await {
+            break;
+        }
 
         if let Some(t) = rate_limit_backoff_started {
             if t.elapsed().as_secs() >= 30 {

@@ -1,0 +1,10 @@
+collect:
+  workingDir: /app
+  contentTypes:
+    Audit.General: True
+    Audit.UALGraph: True
+output:
+  file:
+    path: '/app/output.csv'
+    separateByContentType: True
+    separator: ';'

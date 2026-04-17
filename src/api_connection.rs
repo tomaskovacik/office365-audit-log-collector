@@ -123,7 +123,11 @@ impl ApiConnection {
     pub async fn subscribe_to_feeds(&self) -> Result<()> {
 
         info!("Subscribing to audit feeds.");
-        let mut content_types = self.config.collect.content_types.get_content_type_strings();
+        let mut content_types = self.config.collect.content_types.get_management_content_type_strings();
+        if content_types.is_empty() {
+            info!("No Office Management API content types enabled, skipping feed subscription.");
+            return Ok(())
+        }
 
         let client = reqwest::Client::new();
         info!("Getting current audit feed subscriptions.");
@@ -176,7 +180,7 @@ impl ApiConnection {
     pub fn create_base_urls(&self, runs: HashMap<String, Vec<(String, String)>>) -> Vec<(String, String)> {
 
         let mut urls_to_get: Vec<(String, String)> = Vec::new();
-        let content_to_get = self.config.collect.content_types.get_content_type_strings();
+        let content_to_get = self.config.collect.content_types.get_management_content_type_strings();
         for content_type in content_to_get {
             let content_runs = runs.get(&content_type).unwrap();
             for content_run in content_runs.into_iter() {
