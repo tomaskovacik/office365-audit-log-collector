@@ -12,12 +12,25 @@ mod collector;
 mod api_connection;
 mod data_structures;
 mod config;
-mod interfaces;
 mod interactive_mode;
-
+mod interfaces;
+mod ualgraph;
 
 #[tokio::main]
 async fn main() {
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.get(1).is_some_and(|arg| arg == "export-ualgraph") {
+        let export_args = std::iter::once(raw_args[0].clone())
+            .chain(raw_args.into_iter().skip(2))
+            .collect::<Vec<String>>();
+        let args = ualgraph::UalGraphCliArgs::parse_from(export_args);
+        simple_logging::log_to_stderr(LevelFilter::Info);
+        if let Err(e) = ualgraph::export_ualgraph(args).await {
+            error!("UALGraph export failed: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
 
     let args = data_structures::CliArgs::parse();
     let config = Config::new(args.config.clone());
@@ -94,4 +107,3 @@ impl Log for InteractiveLogger {
     }
     fn flush(&self) {}
 }
-

@@ -53,6 +53,7 @@ If you have any issues or questions, or requests for additional interfaces, feel
   - Audit.Exchange
   - Audit.SharePoint
   - DLP.All
+  - UALGraph export via Microsoft Graph API (`/beta/security/auditLog/queries`) using the `export-ualgraph` command
 - The following outputs are supported:
   - Graylog (or any other source that accepts a simple socket connection)
   - Fluentd
@@ -89,6 +90,9 @@ See the following link for more info on the management APIs: https://msdn.micros
     - Check 'ActivityFeed.Read'
     - Check 'ActivityFeed.ReadDlp'
     - Hit 'Add permissions'
+- For `export-ualgraph`, also grant Microsoft Graph `Application` permission:
+  - `AuditLog.Read.All`
+  - Make sure admin consent is granted
 - You can now run the collector and retrieve logs. 
 
 
@@ -131,6 +135,30 @@ possible options and some explanatory comments. Cross-reference with a config ex
 should be set. Remember to remove (or comment out) all the outputs you do not intent to use.
 
 You can schedule to run the executable with CRON or Task Scheduler.
+
+#### Export UALGraph logs (Microsoft Graph)
+
+You can export UALGraph audit logs directly from Microsoft Graph using:
+
+```
+OfficeAuditLogCollector(.exe) export-ualgraph \
+  --tenant-id %tenant_id% \
+  --client-id %client_id% \
+  --secret-key %client_secret% \
+  --start-time 2026-01-01T00:00:00Z \
+  --end-time 2026-01-01T12:00:00Z \
+  --format json \
+  --output ./ualgraph_export.json
+```
+
+Supported formats:
+- `json`
+- `csv`
+
+Optional arguments:
+- `--filter "<graph_filter_text>"`
+- `--poll-interval-seconds 10`
+- `--timeout-minutes 30`
 
 ### Setting up the collector for Graylog:
 I wrote a full tutorial on the Graylog blog. You can find it
