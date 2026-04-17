@@ -108,6 +108,20 @@ impl Collector {
             }
 
             if entra_audit_enabled {
+                info!("Retrieving Entra ID sign-ins from Microsoft Graph API.");
+                let sign_in_runs = runs
+                    .get("EntraID.SignIns")
+                    .cloned()
+                    .unwrap_or_else(|| config.get_time_ranges());
+                let mut sign_in_logs = graph_connection
+                    .collect_entra_signin_logs(&sign_in_runs, &known_blobs, skip_known_logs)
+                    .await?;
+                info!(
+                    "Retrieved {} Entra ID sign-ins from Graph API.",
+                    sign_in_logs.len()
+                );
+                graph_logs.append(&mut sign_in_logs);
+
                 info!("Retrieving Entra ID directory audit logs from Microsoft Graph API.");
                 let entra_runs = runs
                     .get("EntraID.DirectoryAudits")

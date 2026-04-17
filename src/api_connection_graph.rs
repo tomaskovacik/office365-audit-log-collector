@@ -13,6 +13,7 @@ const POLL_INTERVAL_SECS: u64 = 2;
 const POLL_ATTEMPTS: usize = 60;
 const DEFAULT_EXPIRATION_DAYS: i64 = 30;
 const UAL_GRAPH_CONTENT_TYPE: &str = "UALGraph";
+const ENTRA_SIGNIN_CONTENT_TYPE: &str = "EntraID.SignIns";
 const ENTRA_AUDIT_CONTENT_TYPE: &str = "EntraID.DirectoryAudits";
 
 #[derive(Clone)]
@@ -132,6 +133,59 @@ impl GraphUALConnection {
                     normalize_creation_time(&mut log);
                     if let Some(new_record) = create_graph_log_record(
                         ENTRA_AUDIT_CONTENT_TYPE,
+                        log,
+                        known_blobs,
+                        skip_known_logs,
+                    ) {
+                        collected.push(new_record);
+                    }
+                }
+                next_page = json
+                    .get("@odata.nextLink")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string());
+            }
+        }
+        Ok(collected)
+    }
+
+    pub async fn collect_entra_signin_logs(
+        &self,
+        runs: &Vec<(String, String)>,
+        known_blobs: &HashMap<String, String>,
+        skip_known_logs: bool,
+    ) -> Result<Vec<GraphLogRecord>> {
+        let mut collected = Vec::new();
+
+        for (start_time, end_time) in runs {
+            let mut next_page = Some(build_signin_url(start_time, end_time)?);
+            while let Some(url) = next_page {
+                let response = reqwest::Client::new()
+                    .get(url.clone())
+                    .headers(self.headers.clone())
+                    .send()
+                    .await?;
+                if !response.status().is_success() {
+                    let text = response.text().await?;
+                    return Err(anyhow!("Graph Entra ID sign-ins request failed: {}", text));
+                }
+
+                let json = response.json::<Value>().await?;
+                let records = json
+                    .get("value")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                for record in records {
+                    let map = record.as_object().cloned();
+                    if map.is_none() {
+                        warn!("Sign-in record was not an object, skipping.");
+                        continue;
+                    }
+                    let mut log: ArbitraryJson = map.unwrap().into_iter().collect();
+                    normalize_creation_time(&mut log);
+                    if let Some(new_record) = create_graph_log_record(
+                        ENTRA_SIGNIN_CONTENT_TYPE,
                         log,
                         known_blobs,
                         skip_known_logs,
@@ -348,9 +402,23 @@ fn build_directory_audit_filter(start_time: &str, end_time: &str, categories: &[
     filter
 }
 
+fn build_signin_url(start_time: &str, end_time: &str) -> Result<String> {
+    let mut url = Url::parse("https://graph.microsoft.com/beta/auditLogs/signIns")?;
+    let filter = build_signin_filter(start_time, end_time);
+    url.query_pairs_mut().append_pair("$filter", &filter);
+    Ok(url.to_string())
+}
+
+fn build_signin_filter(start_time: &str, end_time: &str) -> String {
+    format!(
+        "createdDateTime ge {} and createdDateTime le {}",
+        start_time, end_time
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::api_connection_graph::build_directory_audit_filter;
+    use crate::api_connection_graph::{build_directory_audit_filter, build_signin_filter};
 
     #[test]
     fn builds_directory_audit_filter_with_categories() {
@@ -373,5 +441,14 @@ mod tests {
             &vec!["Let'sTest".to_string()],
         );
         assert!(filter.contains("category eq 'Let''sTest'"));
+    }
+
+    #[test]
+    fn builds_signin_filter() {
+        let filter = build_signin_filter("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z");
+        assert_eq!(
+            filter,
+            "createdDateTime ge 2026-01-01T00:00:00Z and createdDateTime le 2026-01-01T01:00:00Z"
+        );
     }
 }

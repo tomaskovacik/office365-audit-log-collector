@@ -204,6 +204,7 @@ impl ContentTypesSubConfig {
             results.push("UALGraph".to_string());
         }
         if self.entra_id_enabled() {
+            results.push("EntraID.SignIns".to_string());
             results.push("EntraID.DirectoryAudits".to_string());
         }
         results
@@ -249,6 +250,7 @@ impl FilterSubConfig {
             results.insert("UALGraph".to_string(), filter.clone());
         }
         if let Some(filter) = self.entra_id.as_ref() {
+            results.insert("EntraID.SignIns".to_string(), filter.clone());
             results.insert("EntraID.DirectoryAudits".to_string(), filter.clone());
         }
         results
@@ -313,6 +315,7 @@ mod tests {
             vec![
                 "Audit.General".to_string(),
                 "UALGraph".to_string(),
+                "EntraID.SignIns".to_string(),
                 "EntraID.DirectoryAudits".to_string()
             ]
         );
