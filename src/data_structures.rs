@@ -1,16 +1,15 @@
-use futures::channel::mpsc::{Sender, Receiver};
-use std::collections::HashMap;
+use crate::config::ContentTypesSubConfig;
+use clap::Parser;
+use futures::channel::mpsc::{Receiver, Sender};
+use log::warn;
 use reqwest::header::HeaderMap;
 use serde_derive::Deserialize;
-use clap::Parser;
-use log::warn;
 use serde_json::Value;
-use crate::config::ContentTypesSubConfig;
+use std::collections::HashMap;
 
 /// List of JSON responses (used to represent content blobs)
 pub type ArbitraryJson = HashMap<String, Value>;
 pub type JsonList = Vec<ArbitraryJson>;
-
 
 #[derive(Default, Clone, Debug)]
 pub struct Caches {
@@ -20,17 +19,18 @@ pub struct Caches {
     pub sharepoint: JsonList,
     pub dlp: JsonList,
     pub ual_graph: JsonList,
+    pub entra_id_directory_audits: JsonList,
     pub size: usize,
 }
 impl Caches {
-
     pub fn full(&self) -> bool {
         let size = self.general.len()
             + self.aad.len()
             + self.exchange.len()
             + self.sharepoint.len()
             + self.dlp.len()
-            + self.ual_graph.len();
+            + self.ual_graph.len()
+            + self.entra_id_directory_audits.len();
         size >= self.size
     }
 
@@ -47,33 +47,38 @@ impl Caches {
             "Audit.SharePoint" => self.sharepoint.push(log),
             "DLP.All" => self.dlp.push(log),
             "UALGraph" => self.ual_graph.push(log),
+            "EntraID.DirectoryAudits" => self.entra_id_directory_audits.push(log),
             _ => warn!("Unknown content type cached: {}", content_type),
         }
     }
 
-    pub fn get_all_types(&self) -> [(String, &JsonList); 6] {
+    pub fn get_all_types(&self) -> [(String, &JsonList); 7] {
         [
             ("Audit.General".to_string(), &self.general),
             ("Audit.AzureActiveDirectory".to_string(), &self.aad),
             ("Audit.Exchange".to_string(), &self.exchange),
             ("Audit.SharePoint".to_string(), &self.sharepoint),
             ("DLP.All".to_string(), &self.dlp),
-            ("UALGraph".to_string(), &self.ual_graph)
+            ("UALGraph".to_string(), &self.ual_graph),
+            (
+                "EntraID.DirectoryAudits".to_string(),
+                &self.entra_id_directory_audits,
+            ),
         ]
     }
 
-    pub fn get_all(&mut self) -> [&mut JsonList; 6] {
+    pub fn get_all(&mut self) -> [&mut JsonList; 7] {
         [
             &mut self.general,
             &mut self.aad,
             &mut self.exchange,
             &mut self.sharepoint,
             &mut self.dlp,
-            &mut self.ual_graph
+            &mut self.ual_graph,
+            &mut self.entra_id_directory_audits,
         ]
     }
 }
-
 
 /// Representation of Office API json response after sending an auth request. We need the bearer
 /// token.
@@ -81,7 +86,6 @@ impl Caches {
 pub struct AuthResult {
     pub access_token: String,
 }
-
 
 /// Representation of content we need to retrieve. ID, expiration and content type are passed to
 /// python along with the retrieved content. ID an expiration are needed for avoiding known logs,
@@ -91,17 +95,17 @@ pub struct ContentToRetrieve {
     pub content_type: String,
     pub content_id: String,
     pub expiration: String,
-    pub url: String
+    pub url: String,
 }
 
 /// Messages for status channel between main threads and the blob/content retrieving threads.
 /// Mainly used to keep track of which content still needs retrieving and which is finished, which
 /// is necessary for knowing when to terminate.
 pub enum StatusMessage {
-    FinishedContentBlobs,  // Finished getting all content blobs for e.g. Audit.Exchange
+    FinishedContentBlobs, // Finished getting all content blobs for e.g. Audit.Exchange
     FoundNewContentBlob,  // Found a new blob to retrieved
     RetrievedContentBlob, // Finished retrieving a new blob
-    ErrorContentBlob, // Could not retrieve a blob
+    ErrorContentBlob,     // Could not retrieve a blob
     BeingThrottled,
 }
 
@@ -114,9 +118,8 @@ pub struct GetBlobConfig {
     pub blob_error_tx: Sender<(String, String)>,
     pub content_tx: Sender<ContentToRetrieve>,
     pub threads: usize,
-    pub duplicate: usize
+    pub duplicate: usize,
 }
-
 
 /// Used by thread getting content
 pub struct GetContentConfig {
@@ -127,7 +130,6 @@ pub struct GetContentConfig {
     pub status_tx: Sender<StatusMessage>,
     pub threads: usize,
 }
-
 
 /// Used by message loop keeping track of progress and terminating other threads when they are
 /// finished.
@@ -144,7 +146,6 @@ pub struct MessageLoopConfig {
     pub retries: usize,
 }
 
-
 /// These stats to show to end-user.
 #[derive(Default, Copy, Clone, Debug)]
 pub struct RunStatistics {
@@ -153,7 +154,6 @@ pub struct RunStatistics {
     pub blobs_error: usize,
     pub blobs_retried: usize,
 }
-
 
 #[derive(Default, Clone)]
 pub struct RunState {
@@ -170,7 +170,6 @@ pub struct RunState {
 /// to prepare your tenant for collection. Then prepare your config file to specify outputs and
 /// collection options (check the examples folder in the repo). Then run the tool with below options.
 pub struct CliArgs {
-
     #[arg(long, help = "ID of tenant to retrieve logs for.")]
     pub tenant_id: String,
 
@@ -180,23 +179,45 @@ pub struct CliArgs {
     #[arg(long, help = "Secret key of app registration used to retrieve logs")]
     pub secret_key: String,
 
-    #[arg(short, long, default_value = "12345678-1234-1234-1234-123456789123", help = "Publisher ID, set to tenant-id if left empty.")]
+    #[arg(
+        short,
+        long,
+        default_value = "12345678-1234-1234-1234-123456789123",
+        help = "Publisher ID, set to tenant-id if left empty."
+    )]
     pub publisher_id: String,
 
     #[arg(long, help = "Path to mandatory config file.")]
     pub config: String,
 
-    #[arg(short, long, default_value = "", help = "Shared key for Azure Log Analytics Workspace.")]
+    #[arg(
+        short,
+        long,
+        default_value = "",
+        help = "Shared key for Azure Log Analytics Workspace."
+    )]
     pub oms_key: String,
 
-    #[arg(short, long, required = false, help = "Interactive interface for (load) testing.")]
+    #[arg(
+        short,
+        long,
+        required = false,
+        help = "Interactive interface for (load) testing."
+    )]
     pub interactive: bool,
+
+    #[arg(
+        long,
+        required = false,
+        help = "Enable or disable Microsoft Entra ID directory audit log export (true/false). Overrides config."
+    )]
+    pub entra_audit: Option<bool>,
 }
 
 #[cfg(test)]
 mod tests {
-    use serde_json::Value;
     use crate::data_structures::{ArbitraryJson, Caches};
+    use serde_json::Value;
 
     #[test]
     fn caches_ual_graph_logs() {
@@ -205,6 +226,6 @@ mod tests {
         log.insert("id".to_string(), Value::String("abc".to_string()));
         cache.insert(log, &"UALGraph".to_string());
         assert_eq!(cache.ual_graph.len(), 1);
-        assert_eq!(cache.get_all_types().len(), 6);
+        assert_eq!(cache.get_all_types().len(), 7);
     }
 }
