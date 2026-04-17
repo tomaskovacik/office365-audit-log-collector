@@ -214,9 +214,16 @@ pub struct CliArgs {
     #[arg(
         long,
         required = false,
-        help = "Enable or disable Microsoft Entra ID Graph log export (sign-ins + directory audits) (true/false). Overrides config."
+        help = "Enable or disable Microsoft Entra ID directory audit log export (true/false). Overrides config."
     )]
     pub entra_audit: Option<bool>,
+
+    #[arg(
+        long,
+        required = false,
+        help = "Enable or disable Microsoft Entra ID sign-in log export (true/false). Requires Azure AD Premium. Overrides config."
+    )]
+    pub entra_signin: Option<bool>,
 }
 
 #[cfg(test)]

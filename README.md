@@ -54,7 +54,8 @@ If you have any issues or questions, or requests for additional interfaces, feel
   - Audit.SharePoint
   - DLP.All
   - Audit.UALGraph (Microsoft Graph beta)
-  - Audit.EntraID (Microsoft Graph sign-ins + directory audits)
+  - Audit.EntraID (Microsoft Graph directory audits)
+  - Audit.EntraIDSignIns (Microsoft Graph sign-ins — requires Azure AD Premium P1 or P2)
 - The following outputs are supported:
   - Graylog (or any other source that accepts a simple socket connection)
   - Fluentd
@@ -97,11 +98,12 @@ See the following link for more info on the management APIs: https://msdn.micros
     - Check `AuditLogs.Read.All`
     - Hit 'Add permissions'
   - Click "Grant admin consent" for the tenant
-- If you want to enable `Audit.EntraID`, also grant Microsoft Graph application permission:
+- If you want to enable `Audit.EntraID` or `Audit.EntraIDSignIns`, also grant Microsoft Graph application permission:
   - Azure AD > 'App registrations' > Click your new app registration > 'API permissions' > 'Add permissions' > 'Microsoft Graph' > 'Application permissions'
     - Check `AuditLog.Read.All`
     - Hit 'Add permissions'
   - Click "Grant admin consent" for the tenant
+  - Note: `Audit.EntraIDSignIns` additionally requires **Azure AD Premium P1 or P2** on the tenant.
 - You can now run the collector and retrieve logs. 
 
 
@@ -153,7 +155,7 @@ should be set. Remember to remove (or comment out) all the outputs you do not in
 Note: Graph UAL is a beta endpoint and can change behavior or schema without notice. The collector normalizes
 `CreationTime` from Graph timestamps when possible so existing outputs keep working.
 
-### Enabling Entra ID sign-ins and directory audits via Microsoft Graph
+### Enabling Entra ID directory audits via Microsoft Graph
 
 - Set `collect.contentTypes.Audit.EntraID: True` in your config.
 - Optional category filter for Graph API requests:
@@ -161,7 +163,19 @@ Note: Graph UAL is a beta endpoint and can change behavior or schema without not
 - Optional CLI override:
   - `--entra-audit true` to force enable
   - `--entra-audit false` to force disable
-- Records are exported under content types `EntraID.SignIns` and `EntraID.DirectoryAudits`, and use the same output interfaces
+- Records are exported under content type `EntraID.DirectoryAudits` and use the same output interfaces
+  (CSV/Graylog/Fluentd/Azure Log Analytics) as other content types.
+
+### Enabling Entra ID sign-ins via Microsoft Graph
+
+> **Note:** Sign-in logs require **Azure AD Premium P1 or P2**. Enabling this on a non-premium tenant
+> will result in a permission error from the Graph API.
+
+- Set `collect.contentTypes.Audit.EntraIDSignIns: True` in your config.
+- Optional CLI override:
+  - `--entra-signin true` to force enable
+  - `--entra-signin false` to force disable
+- Records are exported under content type `EntraID.SignIns` and use the same output interfaces
   (CSV/Graylog/Fluentd/Azure Log Analytics) as other content types.
 
 You can schedule to run the executable with CRON or Task Scheduler.

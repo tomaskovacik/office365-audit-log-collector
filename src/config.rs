@@ -168,6 +168,8 @@ pub struct ContentTypesSubConfig {
     pub ual_graph: Option<bool>,
     #[serde(rename = "Audit.EntraID")]
     pub entra_id: Option<bool>,
+    #[serde(rename = "Audit.EntraIDSignIns")]
+    pub entra_id_sign_ins: Option<bool>,
 }
 impl ContentTypesSubConfig {
     pub fn get_management_content_type_strings(&self) -> Vec<String> {
@@ -198,13 +200,19 @@ impl ContentTypesSubConfig {
         self.entra_id.unwrap_or(false)
     }
 
+    pub fn entra_id_sign_ins_enabled(&self) -> bool {
+        self.entra_id_sign_ins.unwrap_or(false)
+    }
+
     pub fn get_content_type_strings(&self) -> Vec<String> {
         let mut results = self.get_management_content_type_strings();
         if self.graph_ual_enabled() {
             results.push("UALGraph".to_string());
         }
-        if self.entra_id_enabled() {
+        if self.entra_id_sign_ins_enabled() {
             results.push("EntraID.SignIns".to_string());
+        }
+        if self.entra_id_enabled() {
             results.push("EntraID.DirectoryAudits".to_string());
         }
         results
@@ -227,6 +235,8 @@ pub struct FilterSubConfig {
     pub ual_graph: Option<ArbitraryJson>,
     #[serde(rename = "Audit.EntraID")]
     pub entra_id: Option<ArbitraryJson>,
+    #[serde(rename = "Audit.EntraIDSignIns")]
+    pub entra_id_sign_ins: Option<ArbitraryJson>,
 }
 impl FilterSubConfig {
     pub fn get_filters(&self) -> HashMap<String, ArbitraryJson> {
@@ -249,8 +259,10 @@ impl FilterSubConfig {
         if let Some(filter) = self.ual_graph.as_ref() {
             results.insert("UALGraph".to_string(), filter.clone());
         }
-        if let Some(filter) = self.entra_id.as_ref() {
+        if let Some(filter) = self.entra_id_sign_ins.as_ref() {
             results.insert("EntraID.SignIns".to_string(), filter.clone());
+        }
+        if let Some(filter) = self.entra_id.as_ref() {
             results.insert("EntraID.DirectoryAudits".to_string(), filter.clone());
         }
         results
@@ -308,6 +320,7 @@ mod tests {
             dlp: None,
             ual_graph: Some(true),
             entra_id: Some(true),
+            entra_id_sign_ins: Some(true),
         };
 
         assert_eq!(
@@ -322,6 +335,30 @@ mod tests {
         assert_eq!(
             content_types.get_management_content_type_strings(),
             vec!["Audit.General".to_string()]
+        );
+    }
+
+    #[test]
+    fn sign_ins_not_enabled_by_entra_id_alone() {
+        let content_types = ContentTypesSubConfig {
+            general: None,
+            azure_active_directory: None,
+            exchange: None,
+            share_point: None,
+            dlp: None,
+            ual_graph: None,
+            entra_id: Some(true),
+            entra_id_sign_ins: None,
+        };
+
+        let types = content_types.get_content_type_strings();
+        assert!(
+            types.contains(&"EntraID.DirectoryAudits".to_string()),
+            "directory audits should be enabled"
+        );
+        assert!(
+            !types.contains(&"EntraID.SignIns".to_string()),
+            "sign-ins should NOT be enabled without Audit.EntraIDSignIns"
         );
     }
 }

@@ -11,6 +11,7 @@ collect:  # Settings determining which audit logs to collect and how to do it
     DLP.All: True
     Audit.UALGraph: False
     Audit.EntraID: False
+    Audit.EntraIDSignIns: False
   cacheSize: 500000  # Amount of logs to cache/batch until outputting, larger=faster but eats more memory
   maxThreads: 50  # Maximum number of simultaneous threads retrieving logs
   globalTimeout: 1  # Number of minutes before the process is forced to exit if still running (0 = no timeout). If you run e.g. every hour you could set this to 59, ensuring there will only be 1 active process.
@@ -27,6 +28,7 @@ collect:  # Settings determining which audit logs to collect and how to do it
     DLP.All:
     Audit.UALGraph:
     Audit.EntraID:
+    Audit.EntraIDSignIns:
 output:  # Make sure to remove or comment out all outputs you do not intend to use
   file:  # CSV output
     enabled: False

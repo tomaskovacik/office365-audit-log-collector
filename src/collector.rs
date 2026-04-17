@@ -87,10 +87,13 @@ impl Collector {
 
         let known_blobs = config.load_known_blobs();
         let mut graph_logs = Vec::new();
+        let sign_in_enabled = args
+            .entra_signin
+            .unwrap_or(config.collect.content_types.entra_id_sign_ins_enabled());
         let entra_audit_enabled = args
             .entra_audit
             .unwrap_or(config.collect.content_types.entra_id_enabled());
-        if config.collect.content_types.graph_ual_enabled() || entra_audit_enabled {
+        if config.collect.content_types.graph_ual_enabled() || sign_in_enabled || entra_audit_enabled {
             let graph_connection = api_connection_graph::get_graph_connection(args.clone()).await?;
             let skip_known_logs = config.collect.skip_known_logs.unwrap_or(true);
 
@@ -107,7 +110,7 @@ impl Collector {
                 graph_logs.append(&mut ual_graph_logs);
             }
 
-            if entra_audit_enabled {
+            if sign_in_enabled {
                 info!("Retrieving Entra ID sign-ins from Microsoft Graph API.");
                 let sign_in_runs = runs
                     .get("EntraID.SignIns")
@@ -121,7 +124,9 @@ impl Collector {
                     sign_in_logs.len()
                 );
                 graph_logs.append(&mut sign_in_logs);
+            }
 
+            if entra_audit_enabled {
                 info!("Retrieving Entra ID directory audit logs from Microsoft Graph API.");
                 let entra_runs = runs
                     .get("EntraID.DirectoryAudits")
