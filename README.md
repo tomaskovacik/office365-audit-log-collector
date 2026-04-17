@@ -54,6 +54,7 @@ If you have any issues or questions, or requests for additional interfaces, feel
   - Audit.SharePoint
   - DLP.All
   - Audit.UALGraph (Microsoft Graph beta)
+  - Audit.EntraID (Microsoft Graph directory audits)
 - The following outputs are supported:
   - Graylog (or any other source that accepts a simple socket connection)
   - Fluentd
@@ -94,6 +95,11 @@ See the following link for more info on the management APIs: https://msdn.micros
   - Azure AD > 'App registrations' > Click your new app registration > 'API permissions' > 'Add permissions' > 'Microsoft Graph' > 'Application permissions'
     - Check `AuditLogsQuery.Read.All`
     - Check `AuditLogs.Read.All`
+    - Hit 'Add permissions'
+  - Click "Grant admin consent" for the tenant
+- If you want to enable `Audit.EntraID`, also grant Microsoft Graph application permission:
+  - Azure AD > 'App registrations' > Click your new app registration > 'API permissions' > 'Add permissions' > 'Microsoft Graph' > 'Application permissions'
+    - Check `AuditLog.Read.All`
     - Hit 'Add permissions'
   - Click "Grant admin consent" for the tenant
 - You can now run the collector and retrieve logs. 
@@ -146,6 +152,17 @@ should be set. Remember to remove (or comment out) all the outputs you do not in
 
 Note: Graph UAL is a beta endpoint and can change behavior or schema without notice. The collector normalizes
 `CreationTime` from Graph timestamps when possible so existing outputs keep working.
+
+### Enabling Entra ID directory audits via Microsoft Graph
+
+- Set `collect.contentTypes.Audit.EntraID: True` in your config.
+- Optional category filter for Graph API requests:
+  - `collect.entraCategories: ["UserManagement", "RoleManagement"]`
+- Optional CLI override:
+  - `--entra-audit true` to force enable
+  - `--entra-audit false` to force disable
+- Records are exported under content type `EntraID.DirectoryAudits` and use the same output interfaces
+  (CSV/Graylog/Fluentd/Azure Log Analytics) as other content types.
 
 You can schedule to run the executable with CRON or Task Scheduler.
 

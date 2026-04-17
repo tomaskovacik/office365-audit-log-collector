@@ -1,11 +1,11 @@
-use std::collections::HashMap;
-use std::path::Path;
-use async_trait::async_trait;
-use chrono::Utc;
-use csv::{Writer};
 use crate::config::Config;
 use crate::data_structures::{ArbitraryJson, Caches};
 use crate::interfaces::interface::Interface;
+use async_trait::async_trait;
+use chrono::Utc;
+use csv::Writer;
+use std::collections::HashMap;
+use std::path::Path;
 
 /// Interface that send found logs to one CSV file, or one CSV file per content type.
 pub struct FileInterface {
@@ -16,12 +16,11 @@ pub struct FileInterface {
 
 impl FileInterface {
     pub fn new(config: Config) -> Self {
-
         let postfix = Utc::now().format("%Y%m%d%H%M%S").to_string();
         let mut interface = FileInterface {
             config,
             paths: HashMap::new(),
-            postfix: postfix.clone()
+            postfix: postfix.clone(),
         };
         if interface.separate_by_content_type() {
             interface.create_content_type_paths();
@@ -32,22 +31,18 @@ impl FileInterface {
     /// Based on the desired CSV path, create a path for each content type. Used
     /// when SeparateByContentType is true.
     fn create_content_type_paths(&mut self) {
-        let path = Path::new(&self.config.output.file
-            .as_ref()
-            .unwrap()
-            .path);
+        let path = Path::new(&self.config.output.file.as_ref().unwrap().path);
         let dir = path.parent();
-        let stem = path
-            .file_stem().unwrap()
-            .to_str().unwrap()
-            .to_string();
+        let stem = path.file_stem().unwrap().to_str().unwrap().to_string();
 
         let content_strings = self.config.collect.content_types.get_content_type_strings();
-        for content_type in  content_strings {
-            let mut file = format!("{}_{}_{}.csv",
-                               self.postfix.clone(),
-                               stem.clone(),
-                               content_type.replace('.', ""));
+        for content_type in content_strings {
+            let mut file = format!(
+                "{}_{}_{}.csv",
+                self.postfix.clone(),
+                stem.clone(),
+                content_type.replace('.', "")
+            );
             if let Some(parent) = dir {
                 file = format!("{}/{}", parent.to_str().unwrap(), file);
             }
@@ -57,12 +52,17 @@ impl FileInterface {
 
     /// Convenience method to get config property.
     fn separate_by_content_type(&self) -> bool {
-        self.config.output.file.as_ref().unwrap().separate_by_content_type.unwrap_or(false)
+        self.config
+            .output
+            .file
+            .as_ref()
+            .unwrap()
+            .separate_by_content_type
+            .unwrap_or(false)
     }
 
     /// Save the logs of all content types in a single CSV file.
     fn send_logs_unified(&self, mut cache: Caches) {
-
         // Get columns from all content types
         let mut all_logs = cache.get_all();
         let mut columns: Vec<String> = Vec::new();
@@ -71,10 +71,12 @@ impl FileInterface {
         }
 
         let path = &self.config.output.file.as_ref().unwrap().path;
-        let mut wrt =
-            Writer::from_path(path).unwrap_or_else(
-                |e| panic!("Error in CSV interface: Could not write to path '{}': {}", path, e)
-            );
+        let mut wrt = Writer::from_path(path).unwrap_or_else(|e| {
+            panic!(
+                "Error in CSV interface: Could not write to path '{}': {}",
+                path, e
+            )
+        });
         wrt.write_record(&columns).unwrap();
         for logs in all_logs.iter_mut() {
             for log in logs.iter_mut() {
@@ -89,13 +91,16 @@ impl FileInterface {
     fn send_logs_separated(&self, cache: Caches) {
         for (content_type, logs) in cache.get_all_types() {
             if logs.is_empty() {
-                continue
+                continue;
             }
             let columns = get_all_columns(logs);
             let path = self.paths.get(&content_type).unwrap();
-            let mut wrt = Writer::from_path(path).unwrap_or_else(
-                |e| panic!("Error in CSV interface: Could not write to path '{}': {}", path, e)
-            );
+            let mut wrt = Writer::from_path(path).unwrap_or_else(|e| {
+                panic!(
+                    "Error in CSV interface: Could not write to path '{}': {}",
+                    path, e
+                )
+            });
             wrt.write_record(&columns).unwrap();
 
             for log in logs {
@@ -118,10 +123,8 @@ impl Interface for FileInterface {
     }
 }
 
-
 /// Get all column names in a heterogeneous collection of logs.
 pub fn get_all_columns(logs: &[ArbitraryJson]) -> Vec<String> {
-
     let mut columns: Vec<String> = Vec::new();
     for log in logs.iter() {
         for k in log.keys() {
@@ -136,7 +139,7 @@ pub fn get_all_columns(logs: &[ArbitraryJson]) -> Vec<String> {
 /// Due to heterogeneous logs not all logs have all columns. Fill missing columns of
 /// a log with an empty string.
 pub fn fill_log(log: &ArbitraryJson, columns: &Vec<String>) -> Vec<String> {
-    let mut new_log= Vec::new();
+    let mut new_log = Vec::new();
     for col in columns {
         if !log.contains_key(col) {
             new_log.push("".to_string());

@@ -1,28 +1,27 @@
-use std::cmp::max;
-use std::sync::Arc;
-use color_eyre::eyre::Result;
-use crossterm::event::KeyCode::Char;
-use crossterm::event::KeyCode;
-use log::{error, Level, warn};
-use ratatui::{Frame, widgets::*};
-use ratatui::layout::{Constraint, Direction, Layout, Size};
-use ratatui::prelude::*;
-use ratatui::style::Color;
-use ratatui::widgets::ListItem;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use anyhow::Result as AnyHowResult;
-use ratatui::style::palette::tailwind;
-use reqwest::header::HeaderMap;
-use tokio::sync::Mutex;
-use tokio::time::Instant;
-use tui_scrollview::{ScrollView, ScrollViewState};
 use crate::api_connection::ApiConnection;
 use crate::collector::Collector;
 use crate::config::Config;
 use crate::data_structures::{CliArgs, RunState};
 use crate::interactive_mode::tui;
 use crate::interactive_mode::tui::Action;
-
+use anyhow::Result as AnyHowResult;
+use color_eyre::eyre::Result;
+use crossterm::event::KeyCode;
+use crossterm::event::KeyCode::Char;
+use log::{error, warn, Level};
+use ratatui::layout::{Constraint, Direction, Layout, Size};
+use ratatui::prelude::*;
+use ratatui::style::palette::tailwind;
+use ratatui::style::Color;
+use ratatui::widgets::ListItem;
+use ratatui::{widgets::*, Frame};
+use reqwest::header::HeaderMap;
+use std::cmp::max;
+use std::sync::Arc;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::Mutex;
+use tokio::time::Instant;
+use tui_scrollview::{ScrollView, ScrollViewState};
 
 #[derive(Eq, PartialEq, Copy, Clone)]
 enum SelectedBlock {
@@ -31,7 +30,6 @@ enum SelectedBlock {
     Logs,
     Results,
 }
-
 
 #[derive(Clone)]
 struct State {
@@ -67,10 +65,11 @@ struct State {
     rate_limit: bool,
 }
 impl State {
-    pub fn new(args: CliArgs,
-               config: Config,
-               action_tx: UnboundedSender<Action>,
-               interface_tx: UnboundedSender<Vec<String>>
+    pub fn new(
+        args: CliArgs,
+        config: Config,
+        action_tx: UnboundedSender<Action>,
+        interface_tx: UnboundedSender<Vec<String>>,
     ) -> Self {
         Self {
             args,
@@ -107,15 +106,22 @@ impl State {
     }
 }
 
-pub async fn run(args: CliArgs, config: Config, mut log_rx: UnboundedReceiver<(String, Level)>) -> Result<()> {
+pub async fn run(
+    args: CliArgs,
+    config: Config,
+    mut log_rx: UnboundedReceiver<(String, Level)>,
+) -> Result<()> {
     let (action_tx, mut action_rx) = unbounded_channel();
     let (interface_tx, mut interface_rx) = unbounded_channel();
     let mut tui = tui::Tui::new()?.tick_rate(1.0).frame_rate(30.0);
     tui.enter()?;
 
     let mut state = State::new(args, config, action_tx.clone(), interface_tx);
-    let api = Arc::new(Mutex::new(
-        ApiConnection { args: state.args.clone(), config: state.config.clone(), headers: HeaderMap::new() }));
+    let api = Arc::new(Mutex::new(ApiConnection {
+        args: state.args.clone(),
+        config: state.config.clone(),
+        headers: HeaderMap::new(),
+    }));
 
     loop {
         let e = tui.next().await.unwrap();
@@ -167,29 +173,26 @@ fn get_action(_state: &State, event: tui::Event) -> Action {
         tui::Event::Error => Action::None,
         tui::Event::Tick => Action::Tick,
         tui::Event::Render => Action::Render,
-        tui::Event::Key(key) => {
-            match key.code {
-                Char('q') => Action::Quit,
-                Char('c') => Action::GoToCommand,
-                Char('l') => Action::GoToLogs,
-                Char('s') => Action::GoToSubscriptions,
-                Char('r') => Action::GoToResults,
-                KeyCode::Enter => Action::HandleEnter,
-                KeyCode::Up => Action::HandleUp,
-                KeyCode::Down => Action::HandleDown,
-                KeyCode::Left => Action::HandleLeft,
-                KeyCode::Right => Action::HandleRight,
-                KeyCode::PageUp => Action::ScrollPageUp,
-                KeyCode::PageDown => Action::ScrollPageDown,
-                _ => Action::None,
-            }
+        tui::Event::Key(key) => match key.code {
+            Char('q') => Action::Quit,
+            Char('c') => Action::GoToCommand,
+            Char('l') => Action::GoToLogs,
+            Char('s') => Action::GoToSubscriptions,
+            Char('r') => Action::GoToResults,
+            KeyCode::Enter => Action::HandleEnter,
+            KeyCode::Up => Action::HandleUp,
+            KeyCode::Down => Action::HandleDown,
+            KeyCode::Left => Action::HandleLeft,
+            KeyCode::Right => Action::HandleRight,
+            KeyCode::PageUp => Action::ScrollPageUp,
+            KeyCode::PageDown => Action::ScrollPageDown,
+            _ => Action::None,
         },
         _ => Action::None,
     }
 }
 
 fn update(state: &mut State, action: Action, api: Arc<Mutex<ApiConnection>>) {
-
     match action {
         Action::Quit => {
             state.should_quit = true;
@@ -219,11 +222,11 @@ fn update(state: &mut State, action: Action, api: Arc<Mutex<ApiConnection>>) {
         Action::HandleUp => {
             if state.selected_block == SelectedBlock::Logs {
                 state.scroll_log.scroll_up()
-            } else if state.selected_block == SelectedBlock::Results{
+            } else if state.selected_block == SelectedBlock::Results {
                 if let Some(index) = state.table_result.selected() {
-                   if index > 0 {
-                       state.table_result.select(Some(index - 1));
-                   }
+                    if index > 0 {
+                        state.table_result.select(Some(index - 1));
+                    }
                 }
             } else {
                 state.selected_list = state.selected_list.saturating_sub(1);
@@ -232,7 +235,7 @@ fn update(state: &mut State, action: Action, api: Arc<Mutex<ApiConnection>>) {
         Action::HandleDown => {
             if state.selected_block == SelectedBlock::Logs {
                 state.scroll_log.scroll_down()
-            } else if state.selected_block == SelectedBlock::Results{
+            } else if state.selected_block == SelectedBlock::Results {
                 if let Some(index) = state.table_result.selected() {
                     if index < 1000 {
                         state.table_result.select(Some(index + 1));
@@ -247,7 +250,7 @@ fn update(state: &mut State, action: Action, api: Arc<Mutex<ApiConnection>>) {
                     state.selected_list + 1
                 }
             }
-        },
+        }
         Action::HandleLeft => {
             if state.selected_block == SelectedBlock::Commands && state.selected_list == 2 {
                 let mut current = state.config.collect.duplicate.unwrap_or(1);
@@ -259,7 +262,7 @@ fn update(state: &mut State, action: Action, api: Arc<Mutex<ApiConnection>>) {
                     state.table_result_colum_start -= 1;
                 }
             }
-        },
+        }
         Action::HandleRight => {
             if state.selected_block == SelectedBlock::Commands && state.selected_list == 2 {
                 let current = state.config.collect.duplicate.unwrap_or(1);
@@ -274,7 +277,7 @@ fn update(state: &mut State, action: Action, api: Arc<Mutex<ApiConnection>>) {
                     state.table_result_colum_start += 1;
                 }
             }
-        },
+        }
         Action::ScrollPageUp => {
             if state.selected_block == SelectedBlock::Logs {
                 state.scroll_log.scroll_page_up()
@@ -324,46 +327,45 @@ fn update(state: &mut State, action: Action, api: Arc<Mutex<ApiConnection>>) {
         }
         Action::ConnectApi => {
             state.api_connected = true;
-        },
+        }
         Action::DisconnectApi => {
             state.api_connected = false;
-        },
+        }
         Action::EnableSubscriptionGeneral => {
             state.general = true;
-        },
+        }
         Action::DisableSubscriptionGeneral => {
             state.general = false;
-        },
+        }
         Action::EnableSubscriptionAad => {
             state.aad = true;
-        },
+        }
         Action::DisableSubscriptionAad => {
             state.aad = false;
-        },
+        }
         Action::EnableSubscriptionExchange => {
             state.exchange = true;
-        },
+        }
         Action::DisableSubscriptionExchange => {
             state.exchange = false;
-        },
+        }
         Action::EnableSubscriptionSharePoint => {
             state.sharepoint = true;
-        },
+        }
         Action::DisableSubscriptionSharePoint => {
             state.sharepoint = false;
-        },
+        }
         Action::EnableSubscriptionDlp => {
             state.dlp = true;
-        },
+        }
         Action::DisableSubscriptionDlp => {
             state.dlp = false;
-        },
-        _ => (),  // TODO
+        }
+        _ => (), // TODO
     }
 }
 
 fn ui(frame: &mut Frame, state: &mut State) {
-
     // Layouts
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -397,34 +399,22 @@ fn ui(frame: &mut Frame, state: &mut State) {
 
     let horizontal_2 = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(frame.size().width),
-            Constraint::Min(1),
-        ])
+        .constraints([Constraint::Length(frame.size().width), Constraint::Min(1)])
         .split(vertical[2]);
 
     let horizontal_3 = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(frame.size().width),
-            Constraint::Min(1),
-        ])
+        .constraints([Constraint::Length(frame.size().width), Constraint::Min(1)])
         .split(vertical[3]);
 
     let horizontal_4 = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(frame.size().width),
-            Constraint::Min(1),
-        ])
+        .constraints([Constraint::Length(frame.size().width), Constraint::Min(1)])
         .split(vertical[4]);
 
     let horizontal_5 = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(frame.size().width),
-            Constraint::Min(1),
-        ])
+        .constraints([Constraint::Length(frame.size().width), Constraint::Min(1)])
         .split(vertical[5]);
 
     // Connection
@@ -435,32 +425,53 @@ fn ui(frame: &mut Frame, state: &mut State) {
     let mut settings_list_items = Vec::<ListItem>::new();
 
     settings_list_items.push(ListItem::new(Line::from(Span::styled(
-        format!("  Tenant ID: {}", state.args.tenant_id), Style::default().fg(
-            if state.args.tenant_id.is_empty() { Color::Red } else { Color::Green }),
+        format!("  Tenant ID: {}", state.args.tenant_id),
+        Style::default().fg(if state.args.tenant_id.is_empty() {
+            Color::Red
+        } else {
+            Color::Green
+        }),
     ))));
     settings_list_items.push(ListItem::new(Line::from(Span::styled(
-        format!("  Client ID: {}", state.args.client_id), Style::default().fg(
-            if state.args.client_id.is_empty() { Color::Red } else { Color::Green }),
+        format!("  Client ID: {}", state.args.client_id),
+        Style::default().fg(if state.args.client_id.is_empty() {
+            Color::Red
+        } else {
+            Color::Green
+        }),
     ))));
 
     let secret_string = if state.args.secret_key.is_empty() {
         "Secret Key:".to_string()
     } else {
-        format!("  Secret Key: {}{}",
-                state.args.secret_key.clone().split_off(state.args.secret_key.len() - 5),
-                "*".repeat(state.args.secret_key.len() - 5))
+        format!(
+            "  Secret Key: {}{}",
+            state
+                .args
+                .secret_key
+                .clone()
+                .split_off(state.args.secret_key.len() - 5),
+            "*".repeat(state.args.secret_key.len() - 5)
+        )
     };
     settings_list_items.push(ListItem::new(Line::from(Span::styled(
-                secret_string, Style::default().fg(
-            if state.args.secret_key.is_empty() { Color::Red } else { Color::Green }),
+        secret_string,
+        Style::default().fg(if state.args.secret_key.is_empty() {
+            Color::Red
+        } else {
+            Color::Green
+        }),
     ))));
     settings_list_items.push(ListItem::new(Line::from(Span::styled(
-        format!("  Config: {}", state.args.config), Style::default().fg(
-            if state.args.config.is_empty() { Color::Red } else { Color::Green }),
+        format!("  Config: {}", state.args.config),
+        Style::default().fg(if state.args.config.is_empty() {
+            Color::Red
+        } else {
+            Color::Green
+        }),
     ))));
 
-    let settings_list = List::new(settings_list_items)
-        .block(settings_block.clone());
+    let settings_list = List::new(settings_list_items).block(settings_block.clone());
     frame.render_widget(settings_list, horizontal_0[0]);
 
     // Commands
@@ -477,14 +488,20 @@ fn ui(frame: &mut Frame, state: &mut State) {
     let mut commands_list_items = Vec::<ListItem>::new();
 
     commands_list_items.push(ListItem::new(Line::from(Span::styled(
-        "Test API connection", Style::default().fg(Color::Magenta),
+        "Test API connection",
+        Style::default().fg(Color::Magenta),
     ))));
     commands_list_items.push(ListItem::new(Line::from(Span::styled(
-        "Run Collector (using specified config)", Style::default().fg(Color::Magenta),
+        "Run Collector (using specified config)",
+        Style::default().fg(Color::Magenta),
     ))));
     let duplicate = state.config.collect.duplicate.unwrap_or(1);
     commands_list_items.push(ListItem::new(Line::from(Span::styled(
-        format!("< Load test ({}x) > (use arrow keys to increase load)", duplicate), Style::default().fg(Color::Magenta),
+        format!(
+            "< Load test ({}x) > (use arrow keys to increase load)",
+            duplicate
+        ),
+        Style::default().fg(Color::Magenta),
     ))));
 
     let mut command_state = ListState::default().with_selected(Some(state.selected_list));
@@ -515,30 +532,32 @@ fn ui(frame: &mut Frame, state: &mut State) {
     let chart_block = Block::default()
         .title(block::Title::from("Performance").alignment(Alignment::Center))
         .borders(Borders::ALL);
-    let datasets = vec![
-        Dataset::default()
-            .name("Logs per second")
-            .marker(Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().magenta())
-            .data(state.logs_retrieval_speeds.as_slice()),
-    ];
+    let datasets = vec![Dataset::default()
+        .name("Logs per second")
+        .marker(Marker::Braille)
+        .graph_type(GraphType::Line)
+        .style(Style::default().magenta())
+        .data(state.logs_retrieval_speeds.as_slice())];
 
     let x_axis = Axis::default()
         .style(Style::default().white())
-        .bounds([0.0, state.logs_retrieval_speeds.last().unwrap_or(&(10.0, 0.0)).0])
+        .bounds([
+            0.0,
+            state.logs_retrieval_speeds.last().unwrap_or(&(10.0, 0.0)).0,
+        ])
         .labels(vec![]);
 
-    let top_speed = state.logs_retrieval_speeds
+    let top_speed = state
+        .logs_retrieval_speeds
         .iter()
         .map(|(_, s)| *s as usize)
         .max()
         .unwrap_or(15);
-    let y_labels = vec!(
+    let y_labels = vec![
         Span::from((top_speed / 3).to_string()),
         Span::from(((top_speed / 3) * 2).to_string()),
-        Span::from(top_speed.to_string())
-    );
+        Span::from(top_speed.to_string()),
+    ];
     let y_axis = Axis::default()
         .title("Logs per second".red())
         .style(Style::default().white())
@@ -565,28 +584,58 @@ fn ui(frame: &mut Frame, state: &mut State) {
 
     let mut subscription_list_items = Vec::<ListItem>::new();
     subscription_list_items.push(ListItem::new(Line::from(Span::styled(
-        format!("Audit.General active: {}",
-                if state.api_connected {state.general.to_string()} else { "Not connected".to_string() }),
+        format!(
+            "Audit.General active: {}",
+            if state.api_connected {
+                state.general.to_string()
+            } else {
+                "Not connected".to_string()
+            }
+        ),
         Style::default().fg(color_from_bool(state.general)),
     ))));
     subscription_list_items.push(ListItem::new(Line::from(Span::styled(
-        format!("Audit.AzureActiveDirectory active: {}",
-                if state.api_connected {state.aad.to_string()} else { "Not connected".to_string() }),
+        format!(
+            "Audit.AzureActiveDirectory active: {}",
+            if state.api_connected {
+                state.aad.to_string()
+            } else {
+                "Not connected".to_string()
+            }
+        ),
         Style::default().fg(color_from_bool(state.aad)),
     ))));
     subscription_list_items.push(ListItem::new(Line::from(Span::styled(
-        format!("Audit.Exchange active: {}",
-                if state.api_connected {state.exchange.to_string()} else { "Not connected".to_string() }),
+        format!(
+            "Audit.Exchange active: {}",
+            if state.api_connected {
+                state.exchange.to_string()
+            } else {
+                "Not connected".to_string()
+            }
+        ),
         Style::default().fg(color_from_bool(state.exchange)),
     ))));
     subscription_list_items.push(ListItem::new(Line::from(Span::styled(
-        format!("Audit.Sharepoint active: {}",
-                if state.api_connected {state.sharepoint.to_string()} else { "Not connected".to_string() }),
+        format!(
+            "Audit.Sharepoint active: {}",
+            if state.api_connected {
+                state.sharepoint.to_string()
+            } else {
+                "Not connected".to_string()
+            }
+        ),
         Style::default().fg(color_from_bool(state.sharepoint)),
     ))));
     subscription_list_items.push(ListItem::new(Line::from(Span::styled(
-        format!("DLP.All active: {}",
-                if state.api_connected {state.dlp.to_string()} else { "Not connected".to_string() }),
+        format!(
+            "DLP.All active: {}",
+            if state.api_connected {
+                state.dlp.to_string()
+            } else {
+                "Not connected".to_string()
+            }
+        ),
         Style::default().fg(color_from_bool(state.dlp)),
     ))));
     let mut list_state = ListState::default().with_selected(Some(state.selected_list));
@@ -620,17 +669,42 @@ fn ui(frame: &mut Frame, state: &mut State) {
         .title_style(Style::new())
         .borders(Borders::ALL);
 
-    let highest = *[state.found_blobs, state.successful_blobs, state.retry_blobs, state.error_blobs]
-        .iter()
-        .max()
-        .unwrap();
+    let highest = *[
+        state.found_blobs,
+        state.successful_blobs,
+        state.retry_blobs,
+        state.error_blobs,
+    ]
+    .iter()
+    .max()
+    .unwrap();
     let bar = BarChart::default()
         .block(Block::default().title("Run stats").borders(Borders::ALL))
         .bar_width(10)
-        .data(BarGroup::default().bars(&[Bar::default().value(state.found_blobs as u64).style(Style::default().fg(Color::Blue)).label(Line::from("Found"))]))
-        .data(BarGroup::default().bars(&[Bar::default().value(state.successful_blobs as u64).style(Style::default().fg(Color::Green)).label(Line::from("Retrieved"))]))
-        .data(BarGroup::default().bars(&[Bar::default().value(state.retry_blobs as u64).style(Style::default().fg(Color::Yellow)).label(Line::from("Retried"))]))
-        .data(BarGroup::default().bars(&[Bar::default().value(state.error_blobs as u64).style(Style::default().fg(Color::Red)).label(Line::from("Error"))]))
+        .data(
+            BarGroup::default().bars(&[Bar::default()
+                .value(state.found_blobs as u64)
+                .style(Style::default().fg(Color::Blue))
+                .label(Line::from("Found"))]),
+        )
+        .data(
+            BarGroup::default().bars(&[Bar::default()
+                .value(state.successful_blobs as u64)
+                .style(Style::default().fg(Color::Green))
+                .label(Line::from("Retrieved"))]),
+        )
+        .data(
+            BarGroup::default().bars(&[Bar::default()
+                .value(state.retry_blobs as u64)
+                .style(Style::default().fg(Color::Yellow))
+                .label(Line::from("Retried"))]),
+        )
+        .data(
+            BarGroup::default().bars(&[Bar::default()
+                .value(state.error_blobs as u64)
+                .style(Style::default().fg(Color::Red))
+                .label(Line::from("Error"))]),
+        )
         .max(max(highest as u64, 10))
         .block(status_block);
 
@@ -645,31 +719,34 @@ fn ui(frame: &mut Frame, state: &mut State) {
     let mut progress_list_items = Vec::<ListItem>::new();
 
     let (connect_string, color) = if state.api_connected {
-        ("  API Connection: Connected".to_string(), Color::Green,)
+        ("  API Connection: Connected".to_string(), Color::Green)
     } else {
-        ("  API Connection: Disconnected".to_string(), Color::Red,)
+        ("  API Connection: Disconnected".to_string(), Color::Red)
     };
     progress_list_items.push(ListItem::new(Line::from(Span::styled(
-        connect_string, Style::default().fg(color),
+        connect_string,
+        Style::default().fg(color),
     ))));
 
     if state.rate_limit {
         progress_list_items.push(ListItem::new(Line::from(Span::styled(
-            "  Being rate limited!", Style::default().fg(Color::Red).rapid_blink(),
+            "  Being rate limited!",
+            Style::default().fg(Color::Red).rapid_blink(),
         ))));
     } else {
         progress_list_items.push(ListItem::new(Line::from(Span::styled(
-            "  Not rate limited", Style::default().fg(Color::Green),
+            "  Not rate limited",
+            Style::default().fg(Color::Green),
         ))));
     }
 
     let elapsed = if let Some(elapsed) = state.run_started {
-        
         let end = state.run_ended.unwrap_or(Instant::now());
         let total = end.duration_since(elapsed).as_secs();
         let minutes = total / 60;
         let seconds = total % 60;
-        format!("{}{}:{}{}",
+        format!(
+            "{}{}:{}{}",
             if minutes < 10 { "0" } else { "" },
             minutes,
             if seconds < 10 { "0" } else { "" },
@@ -679,11 +756,13 @@ fn ui(frame: &mut Frame, state: &mut State) {
         "  Not started".to_string()
     };
     progress_list_items.push(ListItem::new(Line::from(Span::styled(
-        format!("  Time elapsed: {}", elapsed), Style::default().fg(Color::LightBlue),
+        format!("  Time elapsed: {}", elapsed),
+        Style::default().fg(Color::LightBlue),
     ))));
 
     progress_list_items.push(ListItem::new(Line::from(Span::styled(
-        format!("  Blobs remaining: {}", state.awaiting_blobs), Style::default().fg(Color::LightBlue),
+        format!("  Blobs remaining: {}", state.awaiting_blobs),
+        Style::default().fg(Color::LightBlue),
     ))));
 
     let progress_list = List::new(progress_list_items)
@@ -696,7 +775,8 @@ fn ui(frame: &mut Frame, state: &mut State) {
     let mut logs_list_items = Vec::<ListItem>::new();
     for (log, level) in state.logs.iter() {
         logs_list_items.push(ListItem::new(Line::from(Span::styled(
-            log, Style::default().fg(color_from_level(level)),
+            log,
+            Style::default().fg(color_from_level(level)),
         ))));
     }
     let list_wid = List::new(logs_list_items)
@@ -704,7 +784,7 @@ fn ui(frame: &mut Frame, state: &mut State) {
         .highlight_symbol("  ");
     let size = Size::new(1000, 1000);
     let mut scroll_view = ScrollView::new(size);
-    let area = Rect::new(0, 0, 1000 , 1000);
+    let area = Rect::new(0, 0, 1000, 1000);
     scroll_view.render_widget(list_wid, area);
 
     let palette = tailwind::SLATE;
@@ -717,24 +797,28 @@ fn ui(frame: &mut Frame, state: &mut State) {
     let keys_bg = palette.c600;
     let title = Line::from(vec![
         "<L> Logs  ".into(),
-        "| ↓ | ↑ | PageDown | PageUp |  "
-            .fg(keys_fg)
-            .bg(keys_bg),
+        "| ↓ | ↑ | PageDown | PageUp |  ".fg(keys_fg).bg(keys_bg),
     ])
-        .style((fg, bg)).centered();
+    .style((fg, bg))
+    .centered();
     frame.render_widget(title, horizontal_2[0]);
     frame.render_stateful_widget(scroll_view, horizontal_3[0], &mut state.scroll_log);
 
     // Results
     let mut results = state.results.clone();
-    let mut header = if !results.is_empty() { results.remove(0) } else { Vec::new() };
+    let mut header = if !results.is_empty() {
+        results.remove(0)
+    } else {
+        Vec::new()
+    };
     if header.len() > 10 {
-        header = header[state.table_result_colum_start..state.table_result_colum_start + 10].to_vec();
+        header =
+            header[state.table_result_colum_start..state.table_result_colum_start + 10].to_vec();
     }
     let rows: Vec<Row> = results
         .clone()
         .into_iter()
-        .map(|mut x|{
+        .map(|mut x| {
             x = x[state.table_result_colum_start..state.table_result_colum_start + 10].to_vec();
             Row::new(x)
         })
@@ -743,11 +827,11 @@ fn ui(frame: &mut Frame, state: &mut State) {
         .rows(rows)
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol(">>")
-        .header(Row::new(header)
-            .style(Style::new().bold().underlined())
-            .bottom_margin(1),
+        .header(
+            Row::new(header)
+                .style(Style::new().bold().underlined())
+                .bottom_margin(1),
         );
-    
 
     let palette = tailwind::SLATE;
     let (fg, bg) = if state.selected_block == SelectedBlock::Results {
@@ -759,22 +843,16 @@ fn ui(frame: &mut Frame, state: &mut State) {
     let keys_bg = palette.c600;
     let title = Line::from(vec![
         "<R> Results  ".into(),
-        "  ↓ | ↑ | ← | → | "
-            .fg(keys_fg)
-            .bg(keys_bg),
+        "  ↓ | ↑ | ← | → | ".fg(keys_fg).bg(keys_bg),
     ])
-        .style((fg, bg)).centered();
+    .style((fg, bg))
+    .centered();
     frame.render_widget(title, horizontal_4[0]);
     frame.render_stateful_widget(table, horizontal_5[0], &mut state.table_result);
-
 }
 
 fn color_from_bool(val: bool) -> Color {
-    return if val {
-        Color::Green
-    } else {
-        Color::Red
-    }
+    return if val { Color::Green } else { Color::Red };
 }
 fn color_from_level(level: &Level) -> Color {
     match level {
@@ -795,7 +873,7 @@ async fn handle_enter(state: State, api: Arc<Mutex<ApiConnection>>) {
     };
 }
 
-async fn handle_enter_command(state: State, api: Arc<Mutex<ApiConnection>>) -> AnyHowResult<()>{
+async fn handle_enter_command(state: State, api: Arc<Mutex<ApiConnection>>) -> AnyHowResult<()> {
     match state.selected_list {
         0 => handle_enter_command_connect(state, api).await?,
         1 => handle_enter_command_run(state, false, api).await?,
@@ -805,8 +883,10 @@ async fn handle_enter_command(state: State, api: Arc<Mutex<ApiConnection>>) -> A
     Ok(())
 }
 
-async fn handle_enter_command_connect(state: State, api: Arc<Mutex<ApiConnection>>) -> AnyHowResult<()> {
-
+async fn handle_enter_command_connect(
+    state: State,
+    api: Arc<Mutex<ApiConnection>>,
+) -> AnyHowResult<()> {
     state.action_tx.send(Action::DisconnectApi).unwrap();
     if api.lock().await.headers.is_empty() {
         api.lock().await.login().await?;
@@ -816,11 +896,11 @@ async fn handle_enter_command_connect(state: State, api: Arc<Mutex<ApiConnection
     Ok(())
 }
 
-async fn handle_enter_command_run(state: State,
-                                  load_test: bool,
-                                  api: Arc<Mutex<ApiConnection>>)
-    -> AnyHowResult<()> {
-
+async fn handle_enter_command_run(
+    state: State,
+    load_test: bool,
+    api: Arc<Mutex<ApiConnection>>,
+) -> AnyHowResult<()> {
     let args = state.args.clone();
     let mut config = state.config.clone();
     if !load_test {
@@ -832,11 +912,14 @@ async fn handle_enter_command_run(state: State,
     let run_state = Arc::new(Mutex::new(RunState::default()));
 
     handle_enter_command_connect(state.clone(), api).await?;
-    let mut collector = Collector::new(args,
-                                       config,
-                                       runs,
-                                       run_state.clone(),
-                                       Some(state.interface_tx.clone())).await?;
+    let mut collector = Collector::new(
+        args,
+        config,
+        runs,
+        run_state.clone(),
+        Some(state.interface_tx.clone()),
+    )
+    .await?;
     state.action_tx.send(Action::RunStarted).unwrap();
     let mut elapsed_since_data_point = Instant::now();
     let run_start = elapsed_since_data_point.clone();
@@ -844,12 +927,32 @@ async fn handle_enter_command_run(state: State,
     let mut rate_limited = false;
     loop {
         let stats = run_state.lock().await.stats;
-        state.action_tx.send(Action::UpdateAwaitingBlobs(run_state.lock().await.awaiting_content_blobs)).unwrap();
-        state.action_tx.send(Action::UpdateFoundBlobs(stats.blobs_found)).unwrap();
-        state.action_tx.send(Action::UpdateFoundBlobs(stats.blobs_found)).unwrap();
-        state.action_tx.send(Action::UpdateSuccessfulBlobs(stats.blobs_successful)).unwrap();
-        state.action_tx.send(Action::UpdateErrorBlobs(stats.blobs_error)).unwrap();
-        state.action_tx.send(Action::UpdateRetryBlobs(stats.blobs_retried)).unwrap();
+        state
+            .action_tx
+            .send(Action::UpdateAwaitingBlobs(
+                run_state.lock().await.awaiting_content_blobs,
+            ))
+            .unwrap();
+        state
+            .action_tx
+            .send(Action::UpdateFoundBlobs(stats.blobs_found))
+            .unwrap();
+        state
+            .action_tx
+            .send(Action::UpdateFoundBlobs(stats.blobs_found))
+            .unwrap();
+        state
+            .action_tx
+            .send(Action::UpdateSuccessfulBlobs(stats.blobs_successful))
+            .unwrap();
+        state
+            .action_tx
+            .send(Action::UpdateErrorBlobs(stats.blobs_error))
+            .unwrap();
+        state
+            .action_tx
+            .send(Action::UpdateRetryBlobs(stats.blobs_retried))
+            .unwrap();
 
         if !rate_limited && run_state.lock().await.rate_limited {
             rate_limited = true;
@@ -864,7 +967,10 @@ async fn handle_enter_command_run(state: State,
         } else {
             0
         };
-        state.action_tx.send(Action::RunProgress(progress as u16)).unwrap();
+        state
+            .action_tx
+            .send(Action::RunProgress(progress as u16))
+            .unwrap();
 
         logs_retrieved += collector.check_results().await;
         let done = collector.check_stats().await;
@@ -872,20 +978,41 @@ async fn handle_enter_command_run(state: State,
             logs_retrieved += collector.check_all_results().await;
             state.action_tx.send(Action::RunEnded).unwrap();
             state.action_tx.send(Action::RunProgress(100)).unwrap();
-            state.action_tx.send(Action::LogsRetrieved(logs_retrieved)).unwrap();
-            state.action_tx.send(Action::UpdateFoundBlobs(stats.blobs_found)).unwrap();
-            state.action_tx.send(Action::UpdateSuccessfulBlobs(stats.blobs_successful)).unwrap();
-            state.action_tx.send(Action::UpdateErrorBlobs(stats.blobs_error)).unwrap();
-            state.action_tx.send(Action::UpdateRetryBlobs(stats.blobs_retried)).unwrap();
-            break
+            state
+                .action_tx
+                .send(Action::LogsRetrieved(logs_retrieved))
+                .unwrap();
+            state
+                .action_tx
+                .send(Action::UpdateFoundBlobs(stats.blobs_found))
+                .unwrap();
+            state
+                .action_tx
+                .send(Action::UpdateSuccessfulBlobs(stats.blobs_successful))
+                .unwrap();
+            state
+                .action_tx
+                .send(Action::UpdateErrorBlobs(stats.blobs_error))
+                .unwrap();
+            state
+                .action_tx
+                .send(Action::UpdateRetryBlobs(stats.blobs_retried))
+                .unwrap();
+            break;
         }
-        state.action_tx.send(Action::LogsRetrieved(logs_retrieved)).unwrap();
+        state
+            .action_tx
+            .send(Action::LogsRetrieved(logs_retrieved))
+            .unwrap();
         let since_last_data_point = elapsed_since_data_point.elapsed().as_secs();
         if since_last_data_point >= 1 {
             let t = run_start.elapsed().as_secs() as f64;
             let speed = logs_retrieved as f64 / t;
             for _ in 0..since_last_data_point {
-                state.action_tx.send(Action::LogsRetrievedSpeed((t, speed))).unwrap();
+                state
+                    .action_tx
+                    .send(Action::LogsRetrievedSpeed((t, speed)))
+                    .unwrap();
             }
             elapsed_since_data_point = Instant::now();
         }
@@ -893,17 +1020,44 @@ async fn handle_enter_command_run(state: State,
     Ok(())
 }
 
-async fn handle_enter_subscription(state: State, api: Arc<Mutex<ApiConnection>>) -> AnyHowResult<()> {
-
+async fn handle_enter_subscription(
+    state: State,
+    api: Arc<Mutex<ApiConnection>>,
+) -> AnyHowResult<()> {
     if api.lock().await.headers.is_empty() {
         api.lock().await.login().await?;
     }
     match state.selected_list {
-        0 => api.lock().await.set_subscription("Audit.General".to_string(), !state.general).await,
-        1 => api.lock().await.set_subscription("Audit.AzureActiveDirectory".to_string(), !state.aad).await,
-        2 => api.lock().await.set_subscription("Audit.Exchange".to_string(), !state.exchange).await,
-        3 => api.lock().await.set_subscription("Audit.SharePoint".to_string(), !state.sharepoint).await,
-        4 => api.lock().await.set_subscription("DLP.All".to_string(), !state.dlp).await,
+        0 => {
+            api.lock()
+                .await
+                .set_subscription("Audit.General".to_string(), !state.general)
+                .await
+        }
+        1 => {
+            api.lock()
+                .await
+                .set_subscription("Audit.AzureActiveDirectory".to_string(), !state.aad)
+                .await
+        }
+        2 => {
+            api.lock()
+                .await
+                .set_subscription("Audit.Exchange".to_string(), !state.exchange)
+                .await
+        }
+        3 => {
+            api.lock()
+                .await
+                .set_subscription("Audit.SharePoint".to_string(), !state.sharepoint)
+                .await
+        }
+        4 => {
+            api.lock()
+                .await
+                .set_subscription("DLP.All".to_string(), !state.dlp)
+                .await
+        }
         _ => panic!(),
     }?;
     update_subscriptions(state, api).await?;
@@ -913,29 +1067,53 @@ async fn handle_enter_subscription(state: State, api: Arc<Mutex<ApiConnection>>)
 async fn update_subscriptions(state: State, api: Arc<Mutex<ApiConnection>>) -> AnyHowResult<()> {
     let subscriptions = api.lock().await.get_feeds().await?;
     if subscriptions.contains(&"Audit.General".to_string()) {
-        state.action_tx.send(Action::EnableSubscriptionGeneral).unwrap()
+        state
+            .action_tx
+            .send(Action::EnableSubscriptionGeneral)
+            .unwrap()
     } else {
-        state.action_tx.send(Action::DisableSubscriptionGeneral).unwrap()
+        state
+            .action_tx
+            .send(Action::DisableSubscriptionGeneral)
+            .unwrap()
     }
     if subscriptions.contains(&"Audit.AzureActiveDirectory".to_string()) {
         state.action_tx.send(Action::EnableSubscriptionAad).unwrap()
     } else {
-        state.action_tx.send(Action::DisableSubscriptionAad).unwrap()
+        state
+            .action_tx
+            .send(Action::DisableSubscriptionAad)
+            .unwrap()
     }
     if subscriptions.contains(&"Audit.Exchange".to_string()) {
-        state.action_tx.send(Action::EnableSubscriptionExchange).unwrap()
+        state
+            .action_tx
+            .send(Action::EnableSubscriptionExchange)
+            .unwrap()
     } else {
-        state.action_tx.send(Action::DisableSubscriptionExchange).unwrap()
+        state
+            .action_tx
+            .send(Action::DisableSubscriptionExchange)
+            .unwrap()
     }
     if subscriptions.contains(&"Audit.SharePoint".to_string()) {
-        state.action_tx.send(Action::EnableSubscriptionSharePoint).unwrap()
+        state
+            .action_tx
+            .send(Action::EnableSubscriptionSharePoint)
+            .unwrap()
     } else {
-        state.action_tx.send(Action::DisableSubscriptionSharePoint).unwrap()
+        state
+            .action_tx
+            .send(Action::DisableSubscriptionSharePoint)
+            .unwrap()
     }
     if subscriptions.contains(&"DLP.All".to_string()) {
         state.action_tx.send(Action::EnableSubscriptionDlp).unwrap()
     } else {
-        state.action_tx.send(Action::DisableSubscriptionDlp).unwrap()
+        state
+            .action_tx
+            .send(Action::DisableSubscriptionDlp)
+            .unwrap()
     }
     Ok(())
 }

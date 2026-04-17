@@ -3,6 +3,7 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use log::{error, info, warn};
 use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::Url;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -11,6 +12,8 @@ use tokio::time::sleep;
 const POLL_INTERVAL_SECS: u64 = 2;
 const POLL_ATTEMPTS: usize = 60;
 const DEFAULT_EXPIRATION_DAYS: i64 = 30;
+const UAL_GRAPH_CONTENT_TYPE: &str = "UALGraph";
+const ENTRA_AUDIT_CONTENT_TYPE: &str = "EntraID.DirectoryAudits";
 
 #[derive(Clone)]
 pub struct GraphUALConnection {
@@ -20,6 +23,7 @@ pub struct GraphUALConnection {
 
 #[derive(Clone)]
 pub struct GraphLogRecord {
+    pub content_type: String,
     pub content_id: String,
     pub expiration: String,
     pub log: ArbitraryJson,
@@ -86,6 +90,60 @@ impl GraphUALConnection {
                 .get_query_records(&query_id, known_blobs, skip_known_logs)
                 .await?;
             collected.append(&mut query_logs);
+        }
+        Ok(collected)
+    }
+
+    pub async fn collect_entra_directory_audit_logs(
+        &self,
+        runs: &Vec<(String, String)>,
+        categories: &[String],
+        known_blobs: &HashMap<String, String>,
+        skip_known_logs: bool,
+    ) -> Result<Vec<GraphLogRecord>> {
+        let mut collected = Vec::new();
+
+        for (start_time, end_time) in runs {
+            let mut next_page = Some(build_directory_audit_url(start_time, end_time, categories)?);
+            while let Some(url) = next_page {
+                let response = reqwest::Client::new()
+                    .get(url.clone())
+                    .headers(self.headers.clone())
+                    .send()
+                    .await?;
+                if !response.status().is_success() {
+                    let text = response.text().await?;
+                    return Err(anyhow!("Graph Entra ID audit request failed: {}", text));
+                }
+
+                let json = response.json::<Value>().await?;
+                let records = json
+                    .get("value")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                for record in records {
+                    let map = record.as_object().cloned();
+                    if map.is_none() {
+                        warn!("Directory audit record was not an object, skipping.");
+                        continue;
+                    }
+                    let mut log: ArbitraryJson = map.unwrap().into_iter().collect();
+                    normalize_creation_time(&mut log);
+                    if let Some(new_record) = create_graph_log_record(
+                        ENTRA_AUDIT_CONTENT_TYPE,
+                        log,
+                        known_blobs,
+                        skip_known_logs,
+                    ) {
+                        collected.push(new_record);
+                    }
+                }
+                next_page = json
+                    .get("@odata.nextLink")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string());
+            }
         }
         Ok(collected)
     }
@@ -184,18 +242,14 @@ impl GraphUALConnection {
                 }
                 let mut log: ArbitraryJson = map.unwrap().into_iter().collect();
                 normalize_creation_time(&mut log);
-                let content_id = get_graph_record_id(&log);
-                if skip_known_logs && known_blobs.contains_key(&content_id) {
-                    continue;
-                }
-                let expiration = (Utc::now() + chrono::Duration::try_days(DEFAULT_EXPIRATION_DAYS).unwrap())
-                    .format("%Y-%m-%dT%H:%M:%S.%fZ")
-                    .to_string();
-                results.push(GraphLogRecord {
-                    content_id,
-                    expiration,
+                if let Some(new_record) = create_graph_log_record(
+                    UAL_GRAPH_CONTENT_TYPE,
                     log,
-                });
+                    known_blobs,
+                    skip_known_logs,
+                ) {
+                    results.push(new_record);
+                }
             }
             next_page = json
                 .get("@odata.nextLink")
@@ -224,6 +278,27 @@ fn get_graph_record_id(log: &ArbitraryJson) -> String {
     )
 }
 
+fn create_graph_log_record(
+    content_type: &str,
+    log: ArbitraryJson,
+    known_blobs: &HashMap<String, String>,
+    skip_known_logs: bool,
+) -> Option<GraphLogRecord> {
+    let content_id = get_graph_record_id(&log);
+    if skip_known_logs && known_blobs.contains_key(&content_id) {
+        return None;
+    }
+    let expiration = (Utc::now() + chrono::Duration::try_days(DEFAULT_EXPIRATION_DAYS).unwrap())
+        .format("%Y-%m-%dT%H:%M:%S.%fZ")
+        .to_string();
+    Some(GraphLogRecord {
+        content_type: content_type.to_string(),
+        content_id,
+        expiration,
+        log,
+    })
+}
+
 fn normalize_creation_time(log: &mut ArbitraryJson) {
     if log.contains_key("CreationTime") {
         return;
@@ -243,5 +318,60 @@ fn normalize_creation_time(log: &mut ArbitraryJson) {
                 ),
             );
         }
+    }
+}
+
+fn build_directory_audit_url(
+    start_time: &str,
+    end_time: &str,
+    categories: &[String],
+) -> Result<String> {
+    let mut url = Url::parse("https://graph.microsoft.com/v1.0/auditLogs/directoryAudits")?;
+    let filter = build_directory_audit_filter(start_time, end_time, categories);
+    url.query_pairs_mut().append_pair("$filter", &filter);
+    Ok(url.to_string())
+}
+
+fn build_directory_audit_filter(start_time: &str, end_time: &str, categories: &[String]) -> String {
+    let mut filter = format!(
+        "activityDateTime ge {} and activityDateTime le {}",
+        start_time, end_time
+    );
+    if !categories.is_empty() {
+        let category_filters = categories
+            .iter()
+            .map(|category| format!("category eq '{}'", category.replace('\'', "''")))
+            .collect::<Vec<String>>()
+            .join(" or ");
+        filter = format!("{} and ({})", filter, category_filters);
+    }
+    filter
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api_connection_graph::build_directory_audit_filter;
+
+    #[test]
+    fn builds_directory_audit_filter_with_categories() {
+        let filter = build_directory_audit_filter(
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T01:00:00Z",
+            &vec!["UserManagement".to_string(), "RoleManagement".to_string()],
+        );
+        assert_eq!(
+            filter,
+            "activityDateTime ge 2026-01-01T00:00:00Z and activityDateTime le 2026-01-01T01:00:00Z and (category eq 'UserManagement' or category eq 'RoleManagement')"
+        );
+    }
+
+    #[test]
+    fn escapes_single_quotes_in_category_filter() {
+        let filter = build_directory_audit_filter(
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T01:00:00Z",
+            &vec!["Let'sTest".to_string()],
+        );
+        assert!(filter.contains("category eq 'Let''sTest'"));
     }
 }

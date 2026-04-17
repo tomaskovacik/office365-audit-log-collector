@@ -1,39 +1,40 @@
+use crate::config::Config;
+use crate::data_structures::Caches;
+use crate::interfaces::interface::Interface;
 use async_trait::async_trait;
-use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use chrono::Utc;
 use futures::{stream, StreamExt};
 use hmac::{Hmac, Mac};
 use log::{error, info, warn};
 use sha2::Sha256;
-use crate::config::Config;
-use crate::data_structures::Caches;
-use crate::interfaces::interface::Interface;
 
 pub struct OmsInterface {
     config: Config,
-    key: String
+    key: String,
 }
 
 impl OmsInterface {
-
     pub fn new(config: Config, key: String) -> Self {
-
-        OmsInterface {
-            config,
-            key,
-        }
+        OmsInterface { config, key }
     }
 }
 
 impl OmsInterface {
-    fn build_signature(&self, date: String, content_length: usize, method: String,
-                       content_type: String, resource: String) -> String {
-
+    fn build_signature(
+        &self,
+        date: String,
+        content_length: usize,
+        method: String,
+        content_type: String,
+        resource: String,
+    ) -> String {
         let x_headers = format!("x-ms-date:{}", date);
-        let string_to_hash = format!("{}\n{}\n{}\n{}\n{}",
-                                     method, content_length, content_type,
-                                     x_headers, resource);
+        let string_to_hash = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            method, content_length, content_type, x_headers, resource
+        );
         let bytes_to_hash = string_to_hash.as_bytes();
         let decoded_key = BASE64_STANDARD.decode(self.key.clone()).unwrap();
         type HmacSha = Hmac<Sha256>;
@@ -42,17 +43,17 @@ impl OmsInterface {
         let result = encoded_hash.finalize();
         let code_bytes = result.into_bytes();
         let b = BASE64_STANDARD.encode(code_bytes);
-        let authorization = format!("SharedKey {}:{}",
-                                    self.config.output.oms.as_ref().unwrap().workspace_id,
-                                    b);
-      authorization
-
+        let authorization = format!(
+            "SharedKey {}:{}",
+            self.config.output.oms.as_ref().unwrap().workspace_id,
+            b
+        );
+        authorization
     }
 }
 
 #[async_trait]
 impl Interface for OmsInterface {
-
     async fn send_logs(&mut self, logs: Caches) {
         let client = reqwest::Client::new();
 
@@ -68,16 +69,23 @@ impl Interface for OmsInterface {
                     i.as_str().unwrap().to_string()
                 } else {
                     warn!("Expected CreationTime field, skipping log");
-                    continue
+                    continue;
                 };
-                requests.push((body.clone(), table_name.clone(), time_value.clone(),
-                               content_length));
+                requests.push((
+                    body.clone(),
+                    table_name.clone(),
+                    time_value.clone(),
+                    content_length,
+                ));
             }
         }
 
         let resource = "/api/logs";
-        let uri = format!("https://{}.ods.opinsights.azure.com{}?api-version=2016-04-01",
-                          self.config.output.oms.as_ref().unwrap().workspace_id, resource);
+        let uri = format!(
+            "https://{}.ods.opinsights.azure.com{}?api-version=2016-04-01",
+            self.config.output.oms.as_ref().unwrap().workspace_id,
+            resource
+        );
 
         info!("URL for OMS calls will be: {}", uri);
         let calls = stream::iter(requests)
@@ -120,11 +128,13 @@ impl Interface for OmsInterface {
             })
             .buffer_unordered(10);
 
-        calls.for_each(|call| async {
-            match call {
-                Ok(_) => (),
-                Err(e) => warn!("Issue sending log to workspace: {}", e),
-            }
-        }).await;
+        calls
+            .for_each(|call| async {
+                match call {
+                    Ok(_) => (),
+                    Err(e) => warn!("Issue sending log to workspace: {}", e),
+                }
+            })
+            .await;
     }
 }

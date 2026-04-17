@@ -1,25 +1,23 @@
-use std::sync::Arc;
-use clap::Parser;
 use crate::collector::Collector;
 use crate::config::Config;
-use log::{error, Level, LevelFilter, Log, Metadata, Record};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
-use tokio::sync::Mutex;
 use crate::data_structures::RunState;
 use crate::interactive_mode::interactive;
+use clap::Parser;
+use log::{error, Level, LevelFilter, Log, Metadata, Record};
+use std::sync::Arc;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::Mutex;
 
-mod collector;
 mod api_connection;
 mod api_connection_graph;
-mod data_structures;
+mod collector;
 mod config;
-mod interfaces;
+mod data_structures;
 mod interactive_mode;
-
+mod interfaces;
 
 #[tokio::main]
 async fn main() {
-
     let args = data_structures::CliArgs::parse();
     let config = Config::new(args.config.clone());
     let (log_tx, log_rx) = unbounded_channel();
@@ -43,9 +41,12 @@ async fn main() {
 }
 
 fn init_non_interactive_logging(config: &Config) {
-
     let (path, level) = if let Some(log_config) = &config.log {
-        let level = if log_config.debug { LevelFilter::Debug } else { LevelFilter::Info };
+        let level = if log_config.debug {
+            LevelFilter::Debug
+        } else {
+            LevelFilter::Info
+        };
         (log_config.path.clone(), level)
     } else {
         ("".to_string(), LevelFilter::Info)
@@ -59,9 +60,12 @@ fn init_non_interactive_logging(config: &Config) {
 }
 
 fn init_interactive_logging(config: &Config, log_tx: UnboundedSender<(String, Level)>) {
-
     let level = if let Some(log_config) = &config.log {
-        if log_config.debug { LevelFilter::Debug } else { LevelFilter::Info }
+        if log_config.debug {
+            LevelFilter::Debug
+        } else {
+            LevelFilter::Info
+        }
     } else {
         LevelFilter::Info
     };
@@ -69,10 +73,8 @@ fn init_interactive_logging(config: &Config, log_tx: UnboundedSender<(String, Le
     log::set_boxed_logger(InteractiveLogger::new(log_tx)).unwrap();
 }
 
-
-pub struct  InteractiveLogger {
+pub struct InteractiveLogger {
     log_tx: UnboundedSender<(String, Level)>,
-
 }
 impl InteractiveLogger {
     pub fn new(log_tx: UnboundedSender<(String, Level)>) -> Box<Self> {
@@ -81,16 +83,17 @@ impl InteractiveLogger {
 }
 impl Log for InteractiveLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Info 
+        metadata.level() <= Level::Info
     }
     fn log(&self, record: &Record) {
-
         let date = chrono::Utc::now().to_string();
-        let msg = format!("[{}] {}:{} -- {}",
-                 date,
-                 record.level(),
-                 record.target(),
-                 record.args());
+        let msg = format!(
+            "[{}] {}:{} -- {}",
+            date,
+            record.level(),
+            record.target(),
+            record.args()
+        );
         self.log_tx.send((msg, record.level())).unwrap()
     }
     fn flush(&self) {}
