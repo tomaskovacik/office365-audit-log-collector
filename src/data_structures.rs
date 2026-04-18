@@ -19,6 +19,7 @@ pub struct Caches {
     pub sharepoint: JsonList,
     pub dlp: JsonList,
     pub ual_graph: JsonList,
+    pub entra_id_sign_ins: JsonList,
     pub entra_id_directory_audits: JsonList,
     pub size: usize,
 }
@@ -30,6 +31,7 @@ impl Caches {
             + self.sharepoint.len()
             + self.dlp.len()
             + self.ual_graph.len()
+            + self.entra_id_sign_ins.len()
             + self.entra_id_directory_audits.len();
         size >= self.size
     }
@@ -47,12 +49,13 @@ impl Caches {
             "Audit.SharePoint" => self.sharepoint.push(log),
             "DLP.All" => self.dlp.push(log),
             "UALGraph" => self.ual_graph.push(log),
+            "EntraID.SignIns" => self.entra_id_sign_ins.push(log),
             "EntraID.DirectoryAudits" => self.entra_id_directory_audits.push(log),
             _ => warn!("Unknown content type cached: {}", content_type),
         }
     }
 
-    pub fn get_all_types(&self) -> [(String, &JsonList); 7] {
+    pub fn get_all_types(&self) -> [(String, &JsonList); 8] {
         [
             ("Audit.General".to_string(), &self.general),
             ("Audit.AzureActiveDirectory".to_string(), &self.aad),
@@ -60,6 +63,7 @@ impl Caches {
             ("Audit.SharePoint".to_string(), &self.sharepoint),
             ("DLP.All".to_string(), &self.dlp),
             ("UALGraph".to_string(), &self.ual_graph),
+            ("EntraID.SignIns".to_string(), &self.entra_id_sign_ins),
             (
                 "EntraID.DirectoryAudits".to_string(),
                 &self.entra_id_directory_audits,
@@ -67,7 +71,7 @@ impl Caches {
         ]
     }
 
-    pub fn get_all(&mut self) -> [&mut JsonList; 7] {
+    pub fn get_all(&mut self) -> [&mut JsonList; 8] {
         [
             &mut self.general,
             &mut self.aad,
@@ -75,6 +79,7 @@ impl Caches {
             &mut self.sharepoint,
             &mut self.dlp,
             &mut self.ual_graph,
+            &mut self.entra_id_sign_ins,
             &mut self.entra_id_directory_audits,
         ]
     }
@@ -212,6 +217,13 @@ pub struct CliArgs {
         help = "Enable or disable Microsoft Entra ID directory audit log export (true/false). Overrides config."
     )]
     pub entra_audit: Option<bool>,
+
+    #[arg(
+        long,
+        required = false,
+        help = "Enable or disable Microsoft Entra ID sign-in log export (true/false). Requires Azure AD Premium. Overrides config."
+    )]
+    pub entra_signin: Option<bool>,
 }
 
 #[cfg(test)]
@@ -226,6 +238,15 @@ mod tests {
         log.insert("id".to_string(), Value::String("abc".to_string()));
         cache.insert(log, &"UALGraph".to_string());
         assert_eq!(cache.ual_graph.len(), 1);
-        assert_eq!(cache.get_all_types().len(), 7);
+        assert_eq!(cache.get_all_types().len(), 8);
+    }
+
+    #[test]
+    fn caches_entra_signin_logs() {
+        let mut cache = Caches::new(100);
+        let mut log = ArbitraryJson::new();
+        log.insert("id".to_string(), Value::String("signin-1".to_string()));
+        cache.insert(log, &"EntraID.SignIns".to_string());
+        assert_eq!(cache.entra_id_sign_ins.len(), 1);
     }
 }

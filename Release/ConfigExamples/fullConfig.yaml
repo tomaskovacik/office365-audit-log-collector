@@ -11,12 +11,13 @@ collect:  # Settings determining which audit logs to collect and how to do it
     DLP.All: True
     Audit.UALGraph: False
     Audit.EntraID: False
+    Audit.EntraIDSignIns: False
   cacheSize: 500000  # Amount of logs to cache/batch until outputting, larger=faster but eats more memory
   maxThreads: 50  # Maximum number of simultaneous threads retrieving logs
   globalTimeout: 1  # Number of minutes before the process is forced to exit if still running (0 = no timeout). If you run e.g. every hour you could set this to 59, ensuring there will only be 1 active process.
   retries: 3  # Times to retry retrieving a content blob if it fails
   skipKnownLogs: True  # Remember retrieved log blobs, don't collect them twice
-  entraCategories: []  # Optional categories to request from Graph directoryAudits endpoint, empty=all
+  entraCategories: []  # Optional categories to request from Graph directoryAudits endpoint, empty=all (signIns endpoint is always unfiltered besides time range)
   hoursToCollect: 24  # Look back this many hours for audit logs (max supported by Office API is 168)
   duplicate: 1  # Amount of times to download each log, can be used for performance testing by inflating the number of logs to download. Default is 1
   filter:  # Only logs that match ALL filters for a content type are collected. Leave empty to collect all
@@ -27,6 +28,7 @@ collect:  # Settings determining which audit logs to collect and how to do it
     DLP.All:
     Audit.UALGraph:
     Audit.EntraID:
+    Audit.EntraIDSignIns:
 output:  # Make sure to remove or comment out all outputs you do not intend to use
   file:  # CSV output
     enabled: False
