@@ -24,6 +24,8 @@ param(
 
     [int]$ResultSize = 5000,
 
+    [int]$MaxMailboxes = 0,
+
     [switch]$ManagedIdentity,
 
     [string]$AppId,
@@ -64,12 +66,11 @@ function Connect-Exchange {
         throw 'ExchangeOnlineManagement module is not installed. Install with: Install-Module ExchangeOnlineManagement -Scope CurrentUser'
     }
 
-    Import-Module ExchangeOnlineManagement -ErrorAction Stop | Out-Null
+    Import-Module ExchangeOnlineManagement -ErrorAction Stop
 
     $connectionParams = @{
-        ShowBanner  = $false
+        ShowBanner   = $false
         Organization = $Organization
-        CommandName = @('Get-EXOMailbox', 'Search-MailboxAuditLog')
     }
 
     if ($ManagedIdentity.IsPresent) {
@@ -85,7 +86,7 @@ function Connect-Exchange {
         $connectionParams.CertificatePassword = $CertificatePassword
     }
 
-    Connect-ExchangeOnline @connectionParams | Out-Null
+    Connect-ExchangeOnline @connectionParams
 }
 
 function Get-TargetMailboxes {
@@ -93,8 +94,9 @@ function Get-TargetMailboxes {
         return $MailboxUPN
     }
 
-    Write-Verbose 'No mailbox filter provided. Discovering user/shared mailboxes via Get-EXOMailbox.'
-    return Get-EXOMailbox -ResultSize Unlimited -RecipientTypeDetails UserMailbox, SharedMailbox |
+    $mailboxResultSize = if ($MaxMailboxes -gt 0) { $MaxMailboxes } else { 'Unlimited' }
+    Write-Verbose ("No mailbox filter provided. Discovering user/shared mailboxes via Get-EXOMailbox (ResultSize={0})." -f $mailboxResultSize)
+    return Get-EXOMailbox -ResultSize $mailboxResultSize -RecipientTypeDetails UserMailbox, SharedMailbox |
         Select-Object -ExpandProperty UserPrincipalName
 }
 
@@ -129,46 +131,80 @@ function Convert-AuditEntry {
     return [pscustomobject]$record
 }
 
-function Export-AuditRecords {
-    param(
-        [Parameter(Mandatory = $true)]
-        [object[]]$Records
-    )
-
+function Initialize-OutputWriter {
     $outputDirectory = Split-Path -Path $OutputPath -Parent
     if (-not [string]::IsNullOrWhiteSpace($outputDirectory) -and -not (Test-Path -Path $outputDirectory)) {
         New-Item -Path $outputDirectory -ItemType Directory -Force | Out-Null
     }
 
-    switch ($OutputFormat.ToLowerInvariant()) {
+    $state = @{
+        Format            = $OutputFormat.ToLowerInvariant()
+        RecordsWritten    = 0
+        JsonFirstRecord   = $true
+        CsvInitialized    = $false
+    }
+
+    switch ($state.Format) {
+        'json' {
+            Set-Content -Path $OutputPath -Value '[' -Encoding UTF8
+        }
+        default {
+            Set-Content -Path $OutputPath -Value '' -Encoding UTF8
+        }
+    }
+
+    return $state
+}
+
+function Write-AuditRecord {
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$State,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Record
+    )
+
+    switch ($State.Format) {
         'csv' {
-            if ($Records.Count -eq 0) {
-                Set-Content -Path $OutputPath -Value '' -Encoding UTF8
+            if (-not $State.CsvInitialized) {
+                $Record | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8
+                $State.CsvInitialized = $true
             }
             else {
-                $Records | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8
+                $Record | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8 -Append
             }
         }
         'jsonl' {
-            if ($Records.Count -eq 0) {
-                Set-Content -Path $OutputPath -Value '' -Encoding UTF8
-            }
-            else {
-                $Records |
-                    ForEach-Object { $_ | ConvertTo-Json -Depth 20 -Compress } |
-                    Set-Content -Path $OutputPath -Encoding UTF8
-            }
+            Add-Content -Path $OutputPath -Value ($Record | ConvertTo-Json -Depth 20 -Compress) -Encoding UTF8
         }
         default {
-            $json = $Records | ConvertTo-Json -Depth 20
-            Set-Content -Path $OutputPath -Value $json -Encoding UTF8
+            $json = $Record | ConvertTo-Json -Depth 20 -Compress
+            if (-not $State.JsonFirstRecord) {
+                Add-Content -Path $OutputPath -Value ',' -Encoding UTF8
+            }
+            Add-Content -Path $OutputPath -Value $json -Encoding UTF8
+            $State.JsonFirstRecord = $false
         }
+    }
+
+    $State.RecordsWritten++
+}
+
+function Complete-OutputWriter {
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$State
+    )
+
+    if ($State.Format -eq 'json') {
+        Add-Content -Path $OutputPath -Value ']' -Encoding UTF8
     }
 }
 
 Assert-ValidAuthParameters
 
-$allRecords = New-Object System.Collections.Generic.List[object]
+$outputState = Initialize-OutputWriter
 
 try {
     Write-Verbose 'Connecting to Exchange Online.'
@@ -195,7 +231,8 @@ try {
 
             $entries = Search-MailboxAuditLog @searchParams
             foreach ($entry in $entries) {
-                $allRecords.Add((Convert-AuditEntry -Entry $entry -Mailbox $mailbox))
+                $record = Convert-AuditEntry -Entry $entry -Mailbox $mailbox
+                Write-AuditRecord -State $outputState -Record $record
             }
         }
         catch {
@@ -203,9 +240,9 @@ try {
         }
     }
 
-    Export-AuditRecords -Records $allRecords.ToArray()
-    Write-Host ("Exported {0} Exchange mailbox audit record(s) to {1}" -f $allRecords.Count, $OutputPath)
+    Complete-OutputWriter -State $outputState
+    Write-Host ("Exported {0} Exchange mailbox audit record(s) to {1}" -f $outputState.RecordsWritten, $OutputPath)
 }
 finally {
-    Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+    Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
 }

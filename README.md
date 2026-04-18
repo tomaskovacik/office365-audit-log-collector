@@ -192,6 +192,7 @@ Note: Graph UAL is a beta endpoint and can change behavior or schema without not
   exports records in `json`, `jsonl`, or `csv`.
 - Exported records include `OriginFeed = Audit.ExchangeMailbox` and `CreationTime` (mapped from mailbox audit timestamps when needed)
   so they fit the same downstream output patterns used by this repository.
+- To avoid very large mailbox discovery queries in big tenants, use `-MaxMailboxes` (default `0` = unlimited).
 
 Before collecting mailbox audit logs, ensure mailbox auditing is enabled:
 - Organization-wide: `Set-OrganizationConfig -AuditDisabled $false`
@@ -201,8 +202,8 @@ Example (certificate thumbprint auth, JSON output):
 ```
 pwsh -File ./Release/Scripts/Get-ExchangeMailboxAuditLogs.ps1 \
   -Organization contoso.onmicrosoft.com \
-  -StartDate (Get-Date).AddHours(-24) \
-  -EndDate (Get-Date) \
+  -StartDate '2026-04-17T00:00:00Z' \
+  -EndDate '2026-04-18T00:00:00Z' \
   -AppId 11111111-1111-1111-1111-111111111111 \
   -CertificateThumbprint ABCDEF0123456789ABCDEF0123456789ABCDEF01 \
   -OutputFormat json \
@@ -214,8 +215,8 @@ Example (managed identity, CSV output):
 pwsh -File ./Release/Scripts/Get-ExchangeMailboxAuditLogs.ps1 \
   -Organization contoso.onmicrosoft.com \
   -ManagedIdentity \
-  -StartDate (Get-Date).AddHours(-24) \
-  -EndDate (Get-Date) \
+  -StartDate '2026-04-17T00:00:00Z' \
+  -EndDate '2026-04-18T00:00:00Z' \
   -OutputFormat csv \
   -OutputPath ./exchange-mailbox-audit.csv
 ```
