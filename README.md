@@ -51,7 +51,6 @@ If you have any issues or questions, or requests for additional interfaces, feel
   - Audit.General
   - Audit.AzureActiveDirectory
   - Audit.Exchange
-  - Audit.ExchangeMailbox (Exchange Online PowerShell mailbox audit export script)
   - Audit.SharePoint
   - DLP.All
   - Audit.UALGraph (Microsoft Graph beta)
@@ -105,12 +104,6 @@ See the following link for more info on the management APIs: https://msdn.micros
     - Hit 'Add permissions'
   - Click "Grant admin consent" for the tenant
   - Note: `Audit.EntraIDSignIns` additionally requires **Azure AD Premium P1 or P2** on the tenant.
-- If you want to collect `Audit.ExchangeMailbox` logs using `Release/Scripts/Get-ExchangeMailboxAuditLogs.ps1`, configure Exchange Online app-only auth:
-  - Install Exchange Online module: `Install-Module ExchangeOnlineManagement -Scope CurrentUser`
-  - Azure AD > App registrations > API permissions > Add `Office 365 Exchange Online` application permission `Exchange.ManageAsApp`
-  - Grant admin consent for the permission
-  - In Exchange Online, assign an RBAC role that can read mailbox audit logs (for example via an Exchange role group such as **View-Only Audit Logs**)
-  - Use certificate-based auth (`-CertificateThumbprint` or `-CertificateFilePath`) or managed identity (`-ManagedIdentity`)
 - You can now run the collector and retrieve logs. 
 
 
@@ -184,42 +177,6 @@ Note: Graph UAL is a beta endpoint and can change behavior or schema without not
   - `--entra-signin false` to force disable
 - Records are exported under content type `EntraID.SignIns` and use the same output interfaces
   (CSV/Graylog/Fluentd/Azure Log Analytics) as other content types.
-
-### Collecting Exchange mailbox audit logs via Exchange Online PowerShell
-
-- Script path: `Release/Scripts/Get-ExchangeMailboxAuditLogs.ps1`
-- The script uses modern Exchange Online authentication (certificate-based app auth or managed identity) and
-  exports records in `json`, `jsonl`, or `csv`.
-- Exported records include `OriginFeed = Audit.ExchangeMailbox` and `CreationTime` (mapped from mailbox audit timestamps when needed)
-  so they fit the same downstream output patterns used by this repository.
-- To avoid very large mailbox discovery queries in big tenants, use `-MaxMailboxes` (default `0` = unlimited).
-
-Before collecting mailbox audit logs, ensure mailbox auditing is enabled:
-- Organization-wide: `Set-OrganizationConfig -AuditDisabled $false`
-- Per-mailbox (if needed): `Set-Mailbox <mailbox> -AuditEnabled $true`
-
-Example (certificate thumbprint auth, JSON output):
-```
-pwsh -File ./Release/Scripts/Get-ExchangeMailboxAuditLogs.ps1 \
-  -Organization contoso.onmicrosoft.com \
-  -StartDate '2026-04-17T00:00:00Z' \
-  -EndDate '2026-04-18T00:00:00Z' \
-  -AppId 11111111-1111-1111-1111-111111111111 \
-  -CertificateThumbprint ABCDEF0123456789ABCDEF0123456789ABCDEF01 \
-  -OutputFormat json \
-  -OutputPath ./exchange-mailbox-audit.json
-```
-
-Example (managed identity, CSV output):
-```
-pwsh -File ./Release/Scripts/Get-ExchangeMailboxAuditLogs.ps1 \
-  -Organization contoso.onmicrosoft.com \
-  -ManagedIdentity \
-  -StartDate '2026-04-17T00:00:00Z' \
-  -EndDate '2026-04-18T00:00:00Z' \
-  -OutputFormat csv \
-  -OutputPath ./exchange-mailbox-audit.csv
-```
 
 You can schedule to run the executable with CRON or Task Scheduler.
 
