@@ -160,6 +160,7 @@ pub struct MessageLoopConfig {
     pub content_tx: Sender<ContentToRetrieve>,
     pub content_error_rx: Receiver<ContentToRetrieve>,
     pub urls: Vec<(String, String)>,
+    #[allow(dead_code)] // retained for future use in message loop processing
     pub content_types: ContentTypesSubConfig,
     pub retries: usize,
 }

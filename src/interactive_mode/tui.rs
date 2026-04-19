@@ -21,6 +21,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // Paste/Mouse/Resize variants carry data forwarded via channel but not yet consumed by handlers
 pub enum Event {
     Init,
     Error,
