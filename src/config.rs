@@ -172,6 +172,8 @@ pub struct ContentTypesSubConfig {
     pub entra_id_sign_ins: Option<bool>,
     #[serde(rename = "Audit.ExchangeMailboxGraph")]
     pub exchange_mailbox_graph: Option<bool>,
+    #[serde(rename = "Audit.Intune")]
+    pub intune: Option<bool>,
 }
 impl ContentTypesSubConfig {
     pub fn get_management_content_type_strings(&self) -> Vec<String> {
@@ -210,6 +212,10 @@ impl ContentTypesSubConfig {
         self.exchange_mailbox_graph.unwrap_or(false)
     }
 
+    pub fn intune_enabled(&self) -> bool {
+        self.intune.unwrap_or(false)
+    }
+
     pub fn get_content_type_strings(&self) -> Vec<String> {
         let mut results = self.get_management_content_type_strings();
         if self.graph_ual_enabled() {
@@ -223,6 +229,9 @@ impl ContentTypesSubConfig {
         }
         if self.exchange_mailbox_graph_enabled() {
             results.push("ExchangeMailbox.Graph".to_string());
+        }
+        if self.intune_enabled() {
+            results.push("Intune".to_string());
         }
         results
     }
@@ -248,6 +257,8 @@ pub struct FilterSubConfig {
     pub entra_id_sign_ins: Option<ArbitraryJson>,
     #[serde(rename = "Audit.ExchangeMailboxGraph")]
     pub exchange_mailbox_graph: Option<ArbitraryJson>,
+    #[serde(rename = "Audit.Intune")]
+    pub intune: Option<ArbitraryJson>,
 }
 impl FilterSubConfig {
     pub fn get_filters(&self) -> HashMap<String, ArbitraryJson> {
@@ -278,6 +289,9 @@ impl FilterSubConfig {
         }
         if let Some(filter) = self.exchange_mailbox_graph.as_ref() {
             results.insert("ExchangeMailbox.Graph".to_string(), filter.clone());
+        }
+        if let Some(filter) = self.intune.as_ref() {
+            results.insert("Intune".to_string(), filter.clone());
         }
         results
     }
@@ -336,6 +350,7 @@ mod tests {
             entra_id: Some(true),
             entra_id_sign_ins: Some(true),
             exchange_mailbox_graph: None,
+            intune: None,
         };
 
         assert_eq!(
@@ -365,6 +380,7 @@ mod tests {
             entra_id: Some(true),
             entra_id_sign_ins: None,
             exchange_mailbox_graph: None,
+            intune: None,
         };
 
         let types = content_types.get_content_type_strings();
@@ -390,12 +406,40 @@ mod tests {
             entra_id: None,
             entra_id_sign_ins: None,
             exchange_mailbox_graph: Some(true),
+            intune: None,
         };
 
         let types = content_types.get_content_type_strings();
         assert!(
             types.contains(&"ExchangeMailbox.Graph".to_string()),
             "ExchangeMailbox.Graph should be enabled"
+        );
+        assert_eq!(
+            content_types.get_management_content_type_strings().len(),
+            0,
+            "management API types should be empty"
+        );
+    }
+
+    #[test]
+    fn intune_enabled_when_set() {
+        let content_types = ContentTypesSubConfig {
+            general: None,
+            azure_active_directory: None,
+            exchange: None,
+            share_point: None,
+            dlp: None,
+            ual_graph: None,
+            entra_id: None,
+            entra_id_sign_ins: None,
+            exchange_mailbox_graph: None,
+            intune: Some(true),
+        };
+
+        let types = content_types.get_content_type_strings();
+        assert!(
+            types.contains(&"Intune".to_string()),
+            "Intune should be enabled"
         );
         assert_eq!(
             content_types.get_management_content_type_strings().len(),

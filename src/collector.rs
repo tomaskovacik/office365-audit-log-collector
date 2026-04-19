@@ -96,10 +96,14 @@ impl Collector {
         let exchange_mailbox_enabled = args
             .exchange_mailbox
             .unwrap_or(config.collect.content_types.exchange_mailbox_graph_enabled());
+        let intune_enabled = args
+            .intune
+            .unwrap_or(config.collect.content_types.intune_enabled());
         if config.collect.content_types.graph_ual_enabled()
             || sign_in_enabled
             || entra_audit_enabled
             || exchange_mailbox_enabled
+            || intune_enabled
         {
             let graph_connection = api_connection_graph::get_graph_connection(args.clone()).await?;
             let skip_known_logs = config.collect.skip_known_logs.unwrap_or(true);
@@ -169,6 +173,22 @@ impl Collector {
                     exchange_logs.len()
                 );
                 graph_logs.append(&mut exchange_logs);
+            }
+
+            if intune_enabled {
+                info!("Retrieving Intune audit logs from Microsoft Graph API.");
+                let intune_runs = runs
+                    .get("Intune")
+                    .cloned()
+                    .unwrap_or_else(|| config.get_time_ranges());
+                let mut intune_logs = graph_connection
+                    .collect_intune_logs(&intune_runs, &known_blobs, skip_known_logs)
+                    .await?;
+                info!(
+                    "Retrieved {} Intune audit logs from Graph API.",
+                    intune_logs.len()
+                );
+                graph_logs.append(&mut intune_logs);
             }
         }
         let (result_rx, stats_rx, kill_tx) = get_available_content(

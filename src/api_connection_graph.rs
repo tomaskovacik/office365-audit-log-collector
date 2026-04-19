@@ -16,6 +16,7 @@ const UAL_GRAPH_CONTENT_TYPE: &str = "UALGraph";
 const ENTRA_SIGNIN_CONTENT_TYPE: &str = "EntraID.SignIns";
 const ENTRA_AUDIT_CONTENT_TYPE: &str = "EntraID.DirectoryAudits";
 const EXCHANGE_MAILBOX_GRAPH_CONTENT_TYPE: &str = "ExchangeMailbox.Graph";
+const INTUNE_CONTENT_TYPE: &str = "Intune";
 
 /// Record type filters used when querying the UAL endpoint for Exchange Mailbox events.
 /// Uses the valid `auditLogRecordType` enum values from the Microsoft Graph Security API:
@@ -301,6 +302,63 @@ impl GraphUALConnection {
         self.start_query_with_record_types(start_time, end_time, &[]).await
     }
 
+    /// Collect Intune audit events via the Microsoft Graph deviceManagement endpoint.
+    ///
+    /// Required Graph permission: `DeviceManagementApps.Read.All` or
+    /// `DeviceManagementConfiguration.Read.All`
+    pub async fn collect_intune_logs(
+        &self,
+        runs: &Vec<(String, String)>,
+        known_blobs: &HashMap<String, String>,
+        skip_known_logs: bool,
+    ) -> Result<Vec<GraphLogRecord>> {
+        let mut collected = Vec::new();
+
+        for (start_time, end_time) in runs {
+            let mut next_page = Some(build_intune_url(start_time, end_time)?);
+            while let Some(url) = next_page {
+                let response = reqwest::Client::new()
+                    .get(url.clone())
+                    .headers(self.headers.clone())
+                    .send()
+                    .await?;
+                if !response.status().is_success() {
+                    let text = response.text().await?;
+                    return Err(anyhow!("Graph Intune audit events request failed: {}", text));
+                }
+
+                let json = response.json::<Value>().await?;
+                let records = json
+                    .get("value")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                for record in records {
+                    let map = record.as_object().cloned();
+                    if map.is_none() {
+                        warn!("Intune audit record was not an object, skipping.");
+                        continue;
+                    }
+                    let mut log: ArbitraryJson = map.unwrap().into_iter().collect();
+                    normalize_creation_time(&mut log);
+                    if let Some(new_record) = create_graph_log_record(
+                        INTUNE_CONTENT_TYPE,
+                        log,
+                        known_blobs,
+                        skip_known_logs,
+                    ) {
+                        collected.push(new_record);
+                    }
+                }
+                next_page = json
+                    .get("@odata.nextLink")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string());
+            }
+        }
+        Ok(collected)
+    }
+
     /// Start a UAL audit-log query, optionally filtered to specific record types.
     /// Passing an empty slice means no record-type filter (all types returned).
     async fn start_query_with_record_types(
@@ -525,9 +583,26 @@ fn build_signin_filter(start_time: &str, end_time: &str) -> String {
     )
 }
 
+fn build_intune_url(start_time: &str, end_time: &str) -> Result<String> {
+    let mut url =
+        Url::parse("https://graph.microsoft.com/v1.0/deviceManagement/auditEvents")?;
+    let filter = build_intune_filter(start_time, end_time);
+    url.query_pairs_mut().append_pair("$filter", &filter);
+    Ok(url.to_string())
+}
+
+fn build_intune_filter(start_time: &str, end_time: &str) -> String {
+    format!(
+        "activityDateTime ge {} and activityDateTime le {}",
+        start_time, end_time
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::api_connection_graph::{build_directory_audit_filter, build_signin_filter};
+    use crate::api_connection_graph::{
+        build_directory_audit_filter, build_intune_filter, build_signin_filter,
+    };
 
     #[test]
     fn builds_directory_audit_filter_with_categories() {
@@ -582,6 +657,15 @@ mod tests {
             EXCHANGE_MAILBOX_RECORD_TYPE_FILTERS
                 .contains(&"exchangeItemAggregated"),
             "exchangeItemAggregated should be in filters"
+        );
+    }
+
+    #[test]
+    fn builds_intune_filter() {
+        let filter = build_intune_filter("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z");
+        assert_eq!(
+            filter,
+            "activityDateTime ge 2026-01-01T00:00:00Z and activityDateTime le 2026-01-01T01:00:00Z"
         );
     }
 }
