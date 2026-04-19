@@ -18,9 +18,11 @@ const ENTRA_AUDIT_CONTENT_TYPE: &str = "EntraID.DirectoryAudits";
 const EXCHANGE_MAILBOX_GRAPH_CONTENT_TYPE: &str = "ExchangeMailbox.Graph";
 
 /// Record type filters used when querying the UAL endpoint for Exchange Mailbox events.
-/// These cover mailbox-level audit operations (item read/write/delete) and group mailbox events.
+/// Uses the valid `auditLogRecordType` enum values from the Microsoft Graph Security API:
+/// `exchangeItem` (per-item mailbox operations), `exchangeItemGroup` (group mailbox item
+/// operations), and `exchangeItemAggregated` (aggregated Exchange item events).
 pub(crate) const EXCHANGE_MAILBOX_RECORD_TYPE_FILTERS: &[&str] =
-    &["exchangeMailboxAudit", "exchangeMailboxAuditGroupRecord"];
+    &["exchangeItem", "exchangeItemGroup", "exchangeItemAggregated"];
 
 #[derive(Clone)]
 pub struct GraphUALConnection {
@@ -209,9 +211,9 @@ impl GraphUALConnection {
     }
 
     /// Collect Exchange Mailbox Audit Logs via the Microsoft Graph UAL beta endpoint,
-    /// filtering for `exchangeMailboxAudit` and `exchangeMailboxAuditGroupRecord` record types.
-    /// This gives visibility into per-mailbox operations (read, send, delete, etc.) beyond what
-    /// the Office Management API `Audit.Exchange` content type provides.
+    /// filtering for `exchangeItem`, `exchangeItemGroup`, and `exchangeItemAggregated` record
+    /// types. These are the valid `auditLogRecordType` enum values that cover Exchange mailbox
+    /// item-level operations (read, send, delete, etc.).
     ///
     /// Required Graph permission: `AuditLogsQuery.Read.All`
     pub async fn collect_exchange_mailbox_logs(
@@ -568,13 +570,18 @@ mod tests {
         );
         assert!(
             EXCHANGE_MAILBOX_RECORD_TYPE_FILTERS
-                .contains(&"exchangeMailboxAudit"),
-            "exchangeMailboxAudit should be in filters"
+                .contains(&"exchangeItem"),
+            "exchangeItem should be in filters"
         );
         assert!(
             EXCHANGE_MAILBOX_RECORD_TYPE_FILTERS
-                .contains(&"exchangeMailboxAuditGroupRecord"),
-            "exchangeMailboxAuditGroupRecord should be in filters"
+                .contains(&"exchangeItemGroup"),
+            "exchangeItemGroup should be in filters"
+        );
+        assert!(
+            EXCHANGE_MAILBOX_RECORD_TYPE_FILTERS
+                .contains(&"exchangeItemAggregated"),
+            "exchangeItemAggregated should be in filters"
         );
     }
 }

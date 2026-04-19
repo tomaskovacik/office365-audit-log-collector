@@ -189,8 +189,9 @@ Note: Graph UAL is a beta endpoint and can change behavior or schema without not
 
 Exchange Mailbox Audit Logs capture per-mailbox operations such as reading, sending, moving, and
 deleting email items. This collector queries the Microsoft Graph UAL (Unified Audit Log) beta
-endpoint and filters results to `exchangeMailboxAudit` and `exchangeMailboxAuditGroupRecord`
-record types. This complements the existing `Audit.Exchange` content type (which uses the
+endpoint and filters results to the `exchangeItem`, `exchangeItemGroup`, and
+`exchangeItemAggregated` record types (the valid `auditLogRecordType` enum values for Exchange
+item-level operations). This complements the existing `Audit.Exchange` content type (which uses the
 Office 365 Management API) by providing richer, per-item mailbox-level events.
 
 > **Note:** Exchange mailbox auditing must be enabled for the mailboxes you want to monitor.
