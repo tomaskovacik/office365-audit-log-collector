@@ -1,8 +1,8 @@
-FROM alpine:latest
-
-COPY target/release/office_audit_log_collector /office_audit_log_collector
+FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates libgcc
+
+COPY target/release/office_audit_log_collector /office_audit_log_collector
 
 WORKDIR /app
 
