@@ -93,7 +93,14 @@ impl Collector {
         let entra_audit_enabled = args
             .entra_audit
             .unwrap_or(config.collect.content_types.entra_id_enabled());
-        if config.collect.content_types.graph_ual_enabled() || sign_in_enabled || entra_audit_enabled {
+        let exchange_mailbox_enabled = args
+            .exchange_mailbox
+            .unwrap_or(config.collect.content_types.exchange_mailbox_graph_enabled());
+        if config.collect.content_types.graph_ual_enabled()
+            || sign_in_enabled
+            || entra_audit_enabled
+            || exchange_mailbox_enabled
+        {
             let graph_connection = api_connection_graph::get_graph_connection(args.clone()).await?;
             let skip_known_logs = config.collect.skip_known_logs.unwrap_or(true);
 
@@ -146,6 +153,22 @@ impl Collector {
                     entra_logs.len()
                 );
                 graph_logs.append(&mut entra_logs);
+            }
+
+            if exchange_mailbox_enabled {
+                info!("Retrieving Exchange Mailbox Audit Logs from Microsoft Graph API.");
+                let exchange_runs = runs
+                    .get("ExchangeMailbox.Graph")
+                    .cloned()
+                    .unwrap_or_else(|| config.get_time_ranges());
+                let mut exchange_logs = graph_connection
+                    .collect_exchange_mailbox_logs(&exchange_runs, &known_blobs, skip_known_logs)
+                    .await?;
+                info!(
+                    "Retrieved {} Exchange Mailbox Audit Logs from Graph API.",
+                    exchange_logs.len()
+                );
+                graph_logs.append(&mut exchange_logs);
             }
         }
         let (result_rx, stats_rx, kill_tx) = get_available_content(

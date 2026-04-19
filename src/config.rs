@@ -170,6 +170,8 @@ pub struct ContentTypesSubConfig {
     pub entra_id: Option<bool>,
     #[serde(rename = "Audit.EntraIDSignIns")]
     pub entra_id_sign_ins: Option<bool>,
+    #[serde(rename = "Audit.ExchangeMailboxGraph")]
+    pub exchange_mailbox_graph: Option<bool>,
 }
 impl ContentTypesSubConfig {
     pub fn get_management_content_type_strings(&self) -> Vec<String> {
@@ -204,6 +206,10 @@ impl ContentTypesSubConfig {
         self.entra_id_sign_ins.unwrap_or(false)
     }
 
+    pub fn exchange_mailbox_graph_enabled(&self) -> bool {
+        self.exchange_mailbox_graph.unwrap_or(false)
+    }
+
     pub fn get_content_type_strings(&self) -> Vec<String> {
         let mut results = self.get_management_content_type_strings();
         if self.graph_ual_enabled() {
@@ -214,6 +220,9 @@ impl ContentTypesSubConfig {
         }
         if self.entra_id_enabled() {
             results.push("EntraID.DirectoryAudits".to_string());
+        }
+        if self.exchange_mailbox_graph_enabled() {
+            results.push("ExchangeMailbox.Graph".to_string());
         }
         results
     }
@@ -237,6 +246,8 @@ pub struct FilterSubConfig {
     pub entra_id: Option<ArbitraryJson>,
     #[serde(rename = "Audit.EntraIDSignIns")]
     pub entra_id_sign_ins: Option<ArbitraryJson>,
+    #[serde(rename = "Audit.ExchangeMailboxGraph")]
+    pub exchange_mailbox_graph: Option<ArbitraryJson>,
 }
 impl FilterSubConfig {
     pub fn get_filters(&self) -> HashMap<String, ArbitraryJson> {
@@ -264,6 +275,9 @@ impl FilterSubConfig {
         }
         if let Some(filter) = self.entra_id.as_ref() {
             results.insert("EntraID.DirectoryAudits".to_string(), filter.clone());
+        }
+        if let Some(filter) = self.exchange_mailbox_graph.as_ref() {
+            results.insert("ExchangeMailbox.Graph".to_string(), filter.clone());
         }
         results
     }
@@ -321,6 +335,7 @@ mod tests {
             ual_graph: Some(true),
             entra_id: Some(true),
             entra_id_sign_ins: Some(true),
+            exchange_mailbox_graph: None,
         };
 
         assert_eq!(
@@ -349,6 +364,7 @@ mod tests {
             ual_graph: None,
             entra_id: Some(true),
             entra_id_sign_ins: None,
+            exchange_mailbox_graph: None,
         };
 
         let types = content_types.get_content_type_strings();
@@ -359,6 +375,32 @@ mod tests {
         assert!(
             !types.contains(&"EntraID.SignIns".to_string()),
             "sign-ins should NOT be enabled without Audit.EntraIDSignIns"
+        );
+    }
+
+    #[test]
+    fn exchange_mailbox_graph_enabled_when_set() {
+        let content_types = ContentTypesSubConfig {
+            general: None,
+            azure_active_directory: None,
+            exchange: None,
+            share_point: None,
+            dlp: None,
+            ual_graph: None,
+            entra_id: None,
+            entra_id_sign_ins: None,
+            exchange_mailbox_graph: Some(true),
+        };
+
+        let types = content_types.get_content_type_strings();
+        assert!(
+            types.contains(&"ExchangeMailbox.Graph".to_string()),
+            "ExchangeMailbox.Graph should be enabled"
+        );
+        assert_eq!(
+            content_types.get_management_content_type_strings().len(),
+            0,
+            "management API types should be empty"
         );
     }
 }
