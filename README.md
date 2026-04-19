@@ -57,6 +57,7 @@ If you have any issues or questions, or requests for additional interfaces, feel
   - Audit.EntraID (Microsoft Graph directory audits)
   - Audit.EntraIDSignIns (Microsoft Graph sign-ins — requires Azure AD Premium P1 or P2)
   - Audit.ExchangeMailboxGraph (Microsoft Graph mailbox audit logs — per-mailbox operations via UAL beta endpoint)
+  - Audit.Intune (Microsoft Graph Intune audit events — device management audit log)
 - The following outputs are supported:
   - Graylog (or any other source that accepts a simple socket connection)
   - Fluentd
@@ -111,6 +112,11 @@ See the following link for more info on the management APIs: https://msdn.micros
     - Hit 'Add permissions'
   - Click "Grant admin consent" for the tenant
   - Note: Exchange mailbox auditing must be enabled for the mailboxes you want to audit. See [Enable mailbox auditing](https://learn.microsoft.com/en-us/microsoft-365/compliance/enable-mailbox-auditing) for instructions.
+- If you want to enable `Audit.Intune`, grant Microsoft Graph application permissions:
+  - Azure AD > 'App registrations' > Click your new app registration > 'API permissions' > 'Add permissions' > 'Microsoft Graph' > 'Application permissions'
+    - Check `DeviceManagementApps.Read.All` (or `DeviceManagementConfiguration.Read.All`)
+    - Hit 'Add permissions'
+  - Click "Grant admin consent" for the tenant
 - You can now run the collector and retrieve logs. 
 
 
@@ -207,6 +213,22 @@ Office 365 Management API) by providing richer, per-item mailbox-level events.
   interfaces (CSV/Graylog/Fluentd/Azure Log Analytics) as other content types.
 - Required Microsoft Graph permission: `AuditLogsQuery.Read.All` (same as `Audit.UALGraph`).
 - A ready example config is available at `Release/ConfigExamples/exchangeMailboxGraph.yaml`.
+
+### Enabling Intune Audit Logs via Microsoft Graph
+
+Intune Audit Logs capture device management actions such as policy changes, app assignments,
+device enrolment, and compliance operations performed in Microsoft Intune. This collector queries
+the `https://graph.microsoft.com/v1.0/deviceManagement/auditEvents` endpoint.
+
+- Set `collect.contentTypes.Audit.Intune: True` in your config.
+- Optional CLI override:
+  - `--intune true` to force enable
+  - `--intune false` to force disable
+- Records are exported under content type `Intune` and use the same output interfaces
+  (CSV/Graylog/Fluentd/Azure Log Analytics) as other content types.
+- Required Microsoft Graph permission: `DeviceManagementApps.Read.All` or
+  `DeviceManagementConfiguration.Read.All`.
+- A ready example config is available at `Release/ConfigExamples/intune.yaml`.
 
 You can schedule to run the executable with CRON or Task Scheduler.
 
