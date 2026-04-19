@@ -56,6 +56,7 @@ If you have any issues or questions, or requests for additional interfaces, feel
   - Audit.UALGraph (Microsoft Graph beta)
   - Audit.EntraID (Microsoft Graph directory audits)
   - Audit.EntraIDSignIns (Microsoft Graph sign-ins — requires Azure AD Premium P1 or P2)
+  - Audit.ExchangeMailboxGraph (Microsoft Graph mailbox audit logs — per-mailbox operations via UAL beta endpoint)
 - The following outputs are supported:
   - Graylog (or any other source that accepts a simple socket connection)
   - Fluentd
@@ -104,6 +105,12 @@ See the following link for more info on the management APIs: https://msdn.micros
     - Hit 'Add permissions'
   - Click "Grant admin consent" for the tenant
   - Note: `Audit.EntraIDSignIns` additionally requires **Azure AD Premium P1 or P2** on the tenant.
+- If you want to enable `Audit.ExchangeMailboxGraph`, grant Microsoft Graph application permissions (same as `Audit.UALGraph`):
+  - Azure AD > 'App registrations' > Click your new app registration > 'API permissions' > 'Add permissions' > 'Microsoft Graph' > 'Application permissions'
+    - Check `AuditLogsQuery.Read.All`
+    - Hit 'Add permissions'
+  - Click "Grant admin consent" for the tenant
+  - Note: Exchange mailbox auditing must be enabled for the mailboxes you want to audit. See [Enable mailbox auditing](https://learn.microsoft.com/en-us/microsoft-365/compliance/enable-mailbox-auditing) for instructions.
 - You can now run the collector and retrieve logs. 
 
 
@@ -177,6 +184,28 @@ Note: Graph UAL is a beta endpoint and can change behavior or schema without not
   - `--entra-signin false` to force disable
 - Records are exported under content type `EntraID.SignIns` and use the same output interfaces
   (CSV/Graylog/Fluentd/Azure Log Analytics) as other content types.
+
+### Enabling Exchange Mailbox Audit Logs via Microsoft Graph
+
+Exchange Mailbox Audit Logs capture per-mailbox operations such as reading, sending, moving, and
+deleting email items. This collector queries the Microsoft Graph UAL (Unified Audit Log) beta
+endpoint and filters results to `exchangeMailboxAudit` and `exchangeMailboxAuditGroupRecord`
+record types. This complements the existing `Audit.Exchange` content type (which uses the
+Office 365 Management API) by providing richer, per-item mailbox-level events.
+
+> **Note:** Exchange mailbox auditing must be enabled for the mailboxes you want to monitor.
+> See [Enable mailbox auditing](https://learn.microsoft.com/en-us/microsoft-365/compliance/enable-mailbox-auditing)
+> for instructions. By default, auditing is enabled for Exchange Online mailboxes, but audit
+> actions may need to be expanded.
+
+- Set `collect.contentTypes.Audit.ExchangeMailboxGraph: True` in your config.
+- Optional CLI override:
+  - `--exchange-mailbox true` to force enable
+  - `--exchange-mailbox false` to force disable
+- Records are exported under content type `ExchangeMailbox.Graph` and use the same output
+  interfaces (CSV/Graylog/Fluentd/Azure Log Analytics) as other content types.
+- Required Microsoft Graph permission: `AuditLogsQuery.Read.All` (same as `Audit.UALGraph`).
+- A ready example config is available at `Release/ConfigExamples/exchangeMailboxGraph.yaml`.
 
 You can schedule to run the executable with CRON or Task Scheduler.
 

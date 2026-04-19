@@ -15,6 +15,12 @@ const DEFAULT_EXPIRATION_DAYS: i64 = 30;
 const UAL_GRAPH_CONTENT_TYPE: &str = "UALGraph";
 const ENTRA_SIGNIN_CONTENT_TYPE: &str = "EntraID.SignIns";
 const ENTRA_AUDIT_CONTENT_TYPE: &str = "EntraID.DirectoryAudits";
+const EXCHANGE_MAILBOX_GRAPH_CONTENT_TYPE: &str = "ExchangeMailbox.Graph";
+
+/// Record type filters used when querying the UAL endpoint for Exchange Mailbox events.
+/// These cover mailbox-level audit operations (item read/write/delete) and group mailbox events.
+pub(crate) const EXCHANGE_MAILBOX_RECORD_TYPE_FILTERS: &[&str] =
+    &["exchangeMailboxAudit", "exchangeMailboxAuditGroupRecord"];
 
 #[derive(Clone)]
 pub struct GraphUALConnection {
@@ -202,13 +208,114 @@ impl GraphUALConnection {
         Ok(collected)
     }
 
+    /// Collect Exchange Mailbox Audit Logs via the Microsoft Graph UAL beta endpoint,
+    /// filtering for `exchangeMailboxAudit` and `exchangeMailboxAuditGroupRecord` record types.
+    /// This gives visibility into per-mailbox operations (read, send, delete, etc.) beyond what
+    /// the Office Management API `Audit.Exchange` content type provides.
+    ///
+    /// Required Graph permission: `AuditLogsQuery.Read.All`
+    pub async fn collect_exchange_mailbox_logs(
+        &self,
+        runs: &Vec<(String, String)>,
+        known_blobs: &HashMap<String, String>,
+        skip_known_logs: bool,
+    ) -> Result<Vec<GraphLogRecord>> {
+        let mut collected = Vec::new();
+        for (start_time, end_time) in runs {
+            let query_id = self
+                .start_query_with_record_types(
+                    start_time,
+                    end_time,
+                    EXCHANGE_MAILBOX_RECORD_TYPE_FILTERS,
+                )
+                .await?;
+            self.wait_for_query_completion(&query_id).await?;
+            let mut query_logs = self
+                .get_exchange_mailbox_records(&query_id, known_blobs, skip_known_logs)
+                .await?;
+            collected.append(&mut query_logs);
+        }
+        Ok(collected)
+    }
+
+    async fn get_exchange_mailbox_records(
+        &self,
+        query_id: &str,
+        known_blobs: &HashMap<String, String>,
+        skip_known_logs: bool,
+    ) -> Result<Vec<GraphLogRecord>> {
+        let mut next_page = Some(format!(
+            "https://graph.microsoft.com/beta/security/auditLog/queries/{}/records",
+            query_id
+        ));
+        let mut results = Vec::new();
+
+        while let Some(url) = next_page {
+            let response = reqwest::Client::new()
+                .get(url.clone())
+                .headers(self.headers.clone())
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                let text = response.text().await?;
+                return Err(anyhow!(
+                    "Exchange Mailbox Graph UAL records request failed: {}",
+                    text
+                ));
+            }
+            let json = response.json::<Value>().await?;
+            let records = json
+                .get("value")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            for record in records {
+                let map = record.as_object().cloned();
+                if map.is_none() {
+                    warn!("Exchange Mailbox Graph record was not an object, skipping.");
+                    continue;
+                }
+                let mut log: ArbitraryJson = map.unwrap().into_iter().collect();
+                normalize_creation_time(&mut log);
+                if let Some(new_record) = create_graph_log_record(
+                    EXCHANGE_MAILBOX_GRAPH_CONTENT_TYPE,
+                    log,
+                    known_blobs,
+                    skip_known_logs,
+                ) {
+                    results.push(new_record);
+                }
+            }
+            next_page = json
+                .get("@odata.nextLink")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string());
+        }
+        Ok(results)
+    }
+
     async fn start_query(&self, start_time: &str, end_time: &str) -> Result<String> {
+        self.start_query_with_record_types(start_time, end_time, &[]).await
+    }
+
+    /// Start a UAL audit-log query, optionally filtered to specific record types.
+    /// Passing an empty slice means no record-type filter (all types returned).
+    async fn start_query_with_record_types(
+        &self,
+        start_time: &str,
+        end_time: &str,
+        record_type_filters: &[&str],
+    ) -> Result<String> {
         let url = "https://graph.microsoft.com/beta/security/auditLog/queries";
-        let body = json!({
+        let mut body = json!({
             "displayName": format!("GraphUALCollector-{}-{}", start_time, end_time),
             "filterStartDateTime": start_time,
             "filterEndDateTime": end_time
         });
+        if !record_type_filters.is_empty() {
+            body["recordTypeFilters"] = json!(record_type_filters);
+        }
         let response = reqwest::Client::new()
             .post(url)
             .headers(self.headers.clone())
@@ -449,6 +556,25 @@ mod tests {
         assert_eq!(
             filter,
             "createdDateTime ge 2026-01-01T00:00:00Z and createdDateTime le 2026-01-01T01:00:00Z"
+        );
+    }
+
+    #[test]
+    fn exchange_mailbox_record_type_filters_are_non_empty() {
+        use crate::api_connection_graph::EXCHANGE_MAILBOX_RECORD_TYPE_FILTERS;
+        assert!(
+            !EXCHANGE_MAILBOX_RECORD_TYPE_FILTERS.is_empty(),
+            "Exchange Mailbox record type filters should not be empty"
+        );
+        assert!(
+            EXCHANGE_MAILBOX_RECORD_TYPE_FILTERS
+                .contains(&"exchangeMailboxAudit"),
+            "exchangeMailboxAudit should be in filters"
+        );
+        assert!(
+            EXCHANGE_MAILBOX_RECORD_TYPE_FILTERS
+                .contains(&"exchangeMailboxAuditGroupRecord"),
+            "exchangeMailboxAuditGroupRecord should be in filters"
         );
     }
 }

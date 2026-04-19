@@ -21,6 +21,7 @@ pub struct Caches {
     pub ual_graph: JsonList,
     pub entra_id_sign_ins: JsonList,
     pub entra_id_directory_audits: JsonList,
+    pub exchange_mailbox_graph: JsonList,
     pub size: usize,
 }
 impl Caches {
@@ -32,7 +33,8 @@ impl Caches {
             + self.dlp.len()
             + self.ual_graph.len()
             + self.entra_id_sign_ins.len()
-            + self.entra_id_directory_audits.len();
+            + self.entra_id_directory_audits.len()
+            + self.exchange_mailbox_graph.len();
         size >= self.size
     }
 
@@ -51,11 +53,12 @@ impl Caches {
             "UALGraph" => self.ual_graph.push(log),
             "EntraID.SignIns" => self.entra_id_sign_ins.push(log),
             "EntraID.DirectoryAudits" => self.entra_id_directory_audits.push(log),
+            "ExchangeMailbox.Graph" => self.exchange_mailbox_graph.push(log),
             _ => warn!("Unknown content type cached: {}", content_type),
         }
     }
 
-    pub fn get_all_types(&self) -> [(String, &JsonList); 8] {
+    pub fn get_all_types(&self) -> [(String, &JsonList); 9] {
         [
             ("Audit.General".to_string(), &self.general),
             ("Audit.AzureActiveDirectory".to_string(), &self.aad),
@@ -68,10 +71,14 @@ impl Caches {
                 "EntraID.DirectoryAudits".to_string(),
                 &self.entra_id_directory_audits,
             ),
+            (
+                "ExchangeMailbox.Graph".to_string(),
+                &self.exchange_mailbox_graph,
+            ),
         ]
     }
 
-    pub fn get_all(&mut self) -> [&mut JsonList; 8] {
+    pub fn get_all(&mut self) -> [&mut JsonList; 9] {
         [
             &mut self.general,
             &mut self.aad,
@@ -81,6 +88,7 @@ impl Caches {
             &mut self.ual_graph,
             &mut self.entra_id_sign_ins,
             &mut self.entra_id_directory_audits,
+            &mut self.exchange_mailbox_graph,
         ]
     }
 }
@@ -224,6 +232,13 @@ pub struct CliArgs {
         help = "Enable or disable Microsoft Entra ID sign-in log export (true/false). Requires Azure AD Premium. Overrides config."
     )]
     pub entra_signin: Option<bool>,
+
+    #[arg(
+        long,
+        required = false,
+        help = "Enable or disable Exchange Mailbox Audit Log export via Graph API (true/false). Overrides config."
+    )]
+    pub exchange_mailbox: Option<bool>,
 }
 
 #[cfg(test)]
@@ -238,7 +253,7 @@ mod tests {
         log.insert("id".to_string(), Value::String("abc".to_string()));
         cache.insert(log, &"UALGraph".to_string());
         assert_eq!(cache.ual_graph.len(), 1);
-        assert_eq!(cache.get_all_types().len(), 8);
+        assert_eq!(cache.get_all_types().len(), 9);
     }
 
     #[test]
@@ -248,5 +263,15 @@ mod tests {
         log.insert("id".to_string(), Value::String("signin-1".to_string()));
         cache.insert(log, &"EntraID.SignIns".to_string());
         assert_eq!(cache.entra_id_sign_ins.len(), 1);
+    }
+
+    #[test]
+    fn caches_exchange_mailbox_graph_logs() {
+        let mut cache = Caches::new(100);
+        let mut log = ArbitraryJson::new();
+        log.insert("id".to_string(), Value::String("mbx-1".to_string()));
+        cache.insert(log, &"ExchangeMailbox.Graph".to_string());
+        assert_eq!(cache.exchange_mailbox_graph.len(), 1);
+        assert_eq!(cache.get_all_types().len(), 9);
     }
 }

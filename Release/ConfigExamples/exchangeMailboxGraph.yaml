@@ -1,0 +1,9 @@
+collect:
+  workingDir: /app
+  contentTypes:
+    Audit.ExchangeMailboxGraph: True
+output:
+  file:
+    path: '/app/output.csv'
+    separateByContentType: True
+    separator: ';'
