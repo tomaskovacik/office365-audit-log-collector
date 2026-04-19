@@ -311,6 +311,7 @@ pub struct FileOutputSubConfig {
     pub path: String,
     #[serde(rename = "separateByContentType")]
     pub separate_by_content_type: Option<bool>,
+    #[allow(dead_code)] // documented in config examples; custom CSV separator, not yet implemented
     pub separator: Option<String>,
 }
 
