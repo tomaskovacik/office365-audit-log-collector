@@ -76,7 +76,7 @@ jobs:
         id: cargo_version
         run: echo "version=$(grep '^version' Cargo.toml | head -1 | awk -F'"' '{print $2}')" >> $GITHUB_OUTPUT
       - name: Create GitHub Release and upload binary
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.cargo_version.outputs.version }}
           name: v${{ steps.cargo_version.outputs.version }}
