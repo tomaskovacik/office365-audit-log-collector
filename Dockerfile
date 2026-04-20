@@ -2,6 +2,8 @@ FROM ubuntu:latest
 
 RUN apt-get update
 
+RUN apt-get install -y ca-certificates
+
 RUN apt-get -y upgrade
 
 COPY target/release/office_audit_log_collector /OfficeAuditLogCollector
