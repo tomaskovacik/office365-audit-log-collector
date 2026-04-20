@@ -1,0 +1,17 @@
+name: Verify
+
+on:
+  push:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Check
+        run: cargo check
+      - name: Test
+        run: cargo test
