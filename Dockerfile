@@ -4,7 +4,7 @@ RUN apt-get update
 
 RUN apt-get -y upgrade
 
-COPY office_audit_log_collector /OfficeAuditLogCollector
+COPY target/release/office_audit_log_collector /OfficeAuditLogCollector
 
 WORKDIR /app
 
