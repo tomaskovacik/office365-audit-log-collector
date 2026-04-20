@@ -12,6 +12,8 @@ use tokio::time::sleep;
 const POLL_INTERVAL_SECS: u64 = 2;
 const POLL_ATTEMPTS: usize = 60;
 const DEFAULT_EXPIRATION_DAYS: i64 = 30;
+const RATE_LIMIT_RETRY_ATTEMPTS: usize = 5;
+const RATE_LIMIT_RETRY_SLEEP_SECS: u64 = 60;
 const UAL_GRAPH_CONTENT_TYPE: &str = "UALGraph";
 const ENTRA_SIGNIN_CONTENT_TYPE: &str = "EntraID.SignIns";
 const ENTRA_AUDIT_CONTENT_TYPE: &str = "EntraID.DirectoryAudits";
@@ -116,17 +118,9 @@ impl GraphUALConnection {
         for (start_time, end_time) in runs {
             let mut next_page = Some(build_directory_audit_url(start_time, end_time, categories)?);
             while let Some(url) = next_page {
-                let response = reqwest::Client::new()
-                    .get(url.clone())
-                    .headers(self.headers.clone())
-                    .send()
+                let json = self
+                    .get_json_with_retry(&url, "Graph Entra ID audit request failed")
                     .await?;
-                if !response.status().is_success() {
-                    let text = response.text().await?;
-                    return Err(anyhow!("Graph Entra ID audit request failed: {}", text));
-                }
-
-                let json = response.json::<Value>().await?;
                 let records = json
                     .get("value")
                     .and_then(|v| v.as_array())
@@ -169,17 +163,9 @@ impl GraphUALConnection {
         for (start_time, end_time) in runs {
             let mut next_page = Some(build_signin_url(start_time, end_time)?);
             while let Some(url) = next_page {
-                let response = reqwest::Client::new()
-                    .get(url.clone())
-                    .headers(self.headers.clone())
-                    .send()
+                let json = self
+                    .get_json_with_retry(&url, "Graph Entra ID sign-ins request failed")
                     .await?;
-                if !response.status().is_success() {
-                    let text = response.text().await?;
-                    return Err(anyhow!("Graph Entra ID sign-ins request failed: {}", text));
-                }
-
-                let json = response.json::<Value>().await?;
                 let records = json
                     .get("value")
                     .and_then(|v| v.as_array())
@@ -254,19 +240,9 @@ impl GraphUALConnection {
         let mut results = Vec::new();
 
         while let Some(url) = next_page {
-            let response = reqwest::Client::new()
-                .get(url.clone())
-                .headers(self.headers.clone())
-                .send()
+            let json = self
+                .get_json_with_retry(&url, "Exchange Mailbox Graph UAL records request failed")
                 .await?;
-            if !response.status().is_success() {
-                let text = response.text().await?;
-                return Err(anyhow!(
-                    "Exchange Mailbox Graph UAL records request failed: {}",
-                    text
-                ));
-            }
-            let json = response.json::<Value>().await?;
             let records = json
                 .get("value")
                 .and_then(|v| v.as_array())
@@ -317,17 +293,9 @@ impl GraphUALConnection {
         for (start_time, end_time) in runs {
             let mut next_page = Some(build_intune_url(start_time, end_time)?);
             while let Some(url) = next_page {
-                let response = reqwest::Client::new()
-                    .get(url.clone())
-                    .headers(self.headers.clone())
-                    .send()
+                let json = self
+                    .get_json_with_retry(&url, "Graph Intune audit events request failed")
                     .await?;
-                if !response.status().is_success() {
-                    let text = response.text().await?;
-                    return Err(anyhow!("Graph Intune audit events request failed: {}", text));
-                }
-
-                let json = response.json::<Value>().await?;
                 let records = json
                     .get("value")
                     .and_then(|v| v.as_array())
@@ -376,22 +344,42 @@ impl GraphUALConnection {
         if !record_type_filters.is_empty() {
             body["recordTypeFilters"] = json!(record_type_filters);
         }
-        let response = reqwest::Client::new()
-            .post(url)
-            .headers(self.headers.clone())
-            .json(&body)
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            let text = response.text().await?;
-            return Err(anyhow!("Graph UAL query start failed: {}", text));
+        let mut last_error = String::new();
+        for attempt in 0..RATE_LIMIT_RETRY_ATTEMPTS {
+            if attempt > 0 {
+                warn!(
+                    "Graph API rate limited, waiting {} seconds before retry ({}/{})",
+                    RATE_LIMIT_RETRY_SLEEP_SECS, attempt, RATE_LIMIT_RETRY_ATTEMPTS - 1
+                );
+                sleep(Duration::from_secs(RATE_LIMIT_RETRY_SLEEP_SECS)).await;
+            }
+            let response = reqwest::Client::new()
+                .post(url)
+                .headers(self.headers.clone())
+                .json(&body)
+                .send()
+                .await?;
+            let status = response.status();
+            if !status.is_success() {
+                let text = response.text().await?;
+                if is_rate_limited(status.as_u16(), &text) {
+                    last_error = text;
+                    continue;
+                }
+                return Err(anyhow!("Graph UAL query start failed: {}", text));
+            }
+            let json = response.json::<Value>().await?;
+            let query_id = json
+                .get("id")
+                .and_then(|id| id.as_str())
+                .ok_or_else(|| anyhow!("Graph UAL query did not return an id"))?;
+            return Ok(query_id.to_string());
         }
-        let json = response.json::<Value>().await?;
-        let query_id = json
-            .get("id")
-            .and_then(|id| id.as_str())
-            .ok_or_else(|| anyhow!("Graph UAL query did not return an id"))?;
-        Ok(query_id.to_string())
+        Err(anyhow!(
+            "Graph UAL query start failed after {} attempts due to rate limiting: {}",
+            RATE_LIMIT_RETRY_ATTEMPTS,
+            last_error
+        ))
     }
 
     async fn wait_for_query_completion(&self, query_id: &str) -> Result<()> {
@@ -405,8 +393,17 @@ impl GraphUALConnection {
                 .headers(self.headers.clone())
                 .send()
                 .await?;
-            if !response.status().is_success() {
+            let status = response.status();
+            if !status.is_success() {
                 let text = response.text().await?;
+                if is_rate_limited(status.as_u16(), &text) {
+                    warn!(
+                        "Graph API rate limited during query status check, waiting {} seconds",
+                        RATE_LIMIT_RETRY_SLEEP_SECS
+                    );
+                    sleep(Duration::from_secs(RATE_LIMIT_RETRY_SLEEP_SECS)).await;
+                    continue;
+                }
                 return Err(anyhow!("Graph UAL query status request failed: {}", text));
             }
             let json = response.json::<Value>().await?;
@@ -439,16 +436,9 @@ impl GraphUALConnection {
         let mut results = Vec::new();
 
         while let Some(url) = next_page {
-            let response = reqwest::Client::new()
-                .get(url.clone())
-                .headers(self.headers.clone())
-                .send()
+            let json = self
+                .get_json_with_retry(&url, "Graph UAL records request failed")
                 .await?;
-            if !response.status().is_success() {
-                let text = response.text().await?;
-                return Err(anyhow!("Graph UAL records request failed: {}", text));
-            }
-            let json = response.json::<Value>().await?;
             let records = json
                 .get("value")
                 .and_then(|v| v.as_array())
@@ -479,6 +469,47 @@ impl GraphUALConnection {
         }
         Ok(results)
     }
+
+    /// Performs a GET request to `url`, retrying up to `RATE_LIMIT_RETRY_ATTEMPTS` times when a
+    /// rate-limit response is received. Returns the parsed JSON `Value` on success, or an error
+    /// prefixed with `error_prefix` on failure.
+    async fn get_json_with_retry(&self, url: &str, error_prefix: &str) -> Result<Value> {
+        let mut last_error = String::new();
+        for attempt in 0..RATE_LIMIT_RETRY_ATTEMPTS {
+            if attempt > 0 {
+                warn!(
+                    "Graph API rate limited, waiting {} seconds before retry ({}/{})",
+                    RATE_LIMIT_RETRY_SLEEP_SECS, attempt, RATE_LIMIT_RETRY_ATTEMPTS - 1
+                );
+                sleep(Duration::from_secs(RATE_LIMIT_RETRY_SLEEP_SECS)).await;
+            }
+            let response = reqwest::Client::new()
+                .get(url)
+                .headers(self.headers.clone())
+                .send()
+                .await?;
+            let status = response.status();
+            if !status.is_success() {
+                let text = response.text().await?;
+                if is_rate_limited(status.as_u16(), &text) {
+                    last_error = text;
+                    continue;
+                }
+                return Err(anyhow!("{}: {}", error_prefix, text));
+            }
+            return Ok(response.json::<Value>().await?);
+        }
+        Err(anyhow!(
+            "{} after {} attempts due to rate limiting: {}",
+            error_prefix,
+            RATE_LIMIT_RETRY_ATTEMPTS,
+            last_error
+        ))
+    }
+}
+
+fn is_rate_limited(status: u16, text: &str) -> bool {
+    status == 429 || text.to_lowercase().contains("too many request")
 }
 
 fn get_graph_record_id(log: &ArbitraryJson) -> String {
