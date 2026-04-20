@@ -55,3 +55,30 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  release-binary:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-binary
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Build Linux binary
+        run: cargo build --release
+      - name: Rename binary
+        run: cp target/release/office_audit_log_collector OfficeAuditLogCollector
+      - name: Get app version from Cargo.toml
+        id: cargo_version
+        run: echo "version=$(grep '^version' Cargo.toml | head -1 | awk -F'"' '{print $2}')" >> $GITHUB_OUTPUT
+      - name: Create GitHub Release and upload binary
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.cargo_version.outputs.version }}
+          name: v${{ steps.cargo_version.outputs.version }}
+          files: OfficeAuditLogCollector
+          fail_on_unmatched_files: true
