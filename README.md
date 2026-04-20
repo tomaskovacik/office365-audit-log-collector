@@ -235,3 +235,44 @@ You can schedule to run the executable with CRON or Task Scheduler.
 ### Setting up the collector for Graylog:
 I wrote a full tutorial on the Graylog blog. You can find it
 [here](https://community.graylog.org/t/collecting-office365-azuread-audit-logs-using-office-audit-collector/23925).
+
+#### Creating a Graylog input
+
+The Graylog input which receives the audit data is a simple **Raw/Plaintext TCP** input. You can create it with default
+values; for reference, only the name and port need to be changed from defaults.
+
+Navigate to **System > Inputs > Launch new input**, select **Raw/Plaintext TCP**, and configure the port to match
+the `port` value in your collector config (e.g. `5555`).
+
+#### Creating an extractor
+
+On your new input click **Manage extractors**. We need an extractor to parse the JSON that Microsoft sends.
+Click **Import extractor** and paste the following:
+
+```json
+{
+  "extractors": [
+    {
+      "title": "Audit Log Extractor",
+      "extractor_type": "json",
+      "converters": [],
+      "order": 0,
+      "cursor_strategy": "copy",
+      "source_field": "message",
+      "target_field": "",
+      "extractor_config": {
+        "flatten": true,
+        "list_separator": ", ",
+        "kv_separator": "=",
+        "key_prefix": "",
+        "key_separator": "_",
+        "replace_key_whitespace": false,
+        "key_whitespace_replacement": "_"
+      },
+      "condition_type": "none",
+      "condition_value": ""
+    }
+  ],
+  "version": "4.2.9"
+}
+```
