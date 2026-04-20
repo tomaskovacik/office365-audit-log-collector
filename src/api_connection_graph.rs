@@ -14,7 +14,7 @@ const POLL_ATTEMPTS: usize = 60;
 const DEFAULT_EXPIRATION_DAYS: i64 = 30;
 const RATE_LIMIT_RETRY_ATTEMPTS: usize = 5;
 const RATE_LIMIT_RETRY_SLEEP_SECS: u64 = 60;
-const QUERY_TIMEOUT_RETRY_ATTEMPTS: usize = 3;
+pub const DEFAULT_QUERY_TIMEOUT_RETRIES: usize = 3;
 const UAL_GRAPH_CONTENT_TYPE: &str = "UALGraph";
 const ENTRA_SIGNIN_CONTENT_TYPE: &str = "EntraID.SignIns";
 const ENTRA_AUDIT_CONTENT_TYPE: &str = "EntraID.DirectoryAudits";
@@ -32,6 +32,7 @@ pub(crate) const EXCHANGE_MAILBOX_RECORD_TYPE_FILTERS: &[&str] =
 pub struct GraphUALConnection {
     pub args: CliArgs,
     pub headers: HeaderMap,
+    pub retries: usize,
 }
 
 #[derive(Clone)]
@@ -42,10 +43,11 @@ pub struct GraphLogRecord {
     pub log: ArbitraryJson,
 }
 
-pub async fn get_graph_connection(args: CliArgs) -> Result<GraphUALConnection> {
+pub async fn get_graph_connection(args: CliArgs, retries: usize) -> Result<GraphUALConnection> {
     let mut api = GraphUALConnection {
         args,
         headers: HeaderMap::new(),
+        retries,
     };
     api.login().await?;
     Ok(api)
@@ -97,13 +99,13 @@ impl GraphUALConnection {
     ) -> Result<Vec<GraphLogRecord>> {
         let mut collected = Vec::new();
         for (start_time, end_time) in runs {
-            let mut last_err = anyhow!("Graph UAL query timed out after {} attempts", QUERY_TIMEOUT_RETRY_ATTEMPTS);
+            let mut last_err = anyhow!("Graph UAL query timed out after {} attempts", self.retries);
             let mut succeeded = false;
-            for attempt in 0..QUERY_TIMEOUT_RETRY_ATTEMPTS {
+            for attempt in 0..self.retries {
                 if attempt > 0 {
                     warn!(
                         "Graph UAL query timed out, retrying ({}/{})",
-                        attempt, QUERY_TIMEOUT_RETRY_ATTEMPTS - 1
+                        attempt, self.retries - 1
                     );
                 }
                 let query_id = self.start_query(start_time, end_time).await?;
@@ -234,13 +236,13 @@ impl GraphUALConnection {
     ) -> Result<Vec<GraphLogRecord>> {
         let mut collected = Vec::new();
         for (start_time, end_time) in runs {
-            let mut last_err = anyhow!("Graph UAL query timed out after {} attempts", QUERY_TIMEOUT_RETRY_ATTEMPTS);
+            let mut last_err = anyhow!("Graph UAL query timed out after {} attempts", self.retries);
             let mut succeeded = false;
-            for attempt in 0..QUERY_TIMEOUT_RETRY_ATTEMPTS {
+            for attempt in 0..self.retries {
                 if attempt > 0 {
                     warn!(
                         "Graph UAL query timed out, retrying ({}/{})",
-                        attempt, QUERY_TIMEOUT_RETRY_ATTEMPTS - 1
+                        attempt, self.retries - 1
                     );
                 }
                 let query_id = self
