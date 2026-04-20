@@ -32,7 +32,7 @@ jobs:
         id: cargo_version
         run: echo "version=$(grep '^version' Cargo.toml | head -1 | awk -F'"' '{print $2}')" >> $GITHUB_OUTPUT
       - name: Log in to the Container registry
-        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        uses: docker/login-action@4a8376e001c7725687f0624d1c3698a3f6ab337e
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
