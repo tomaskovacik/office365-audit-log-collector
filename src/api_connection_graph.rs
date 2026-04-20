@@ -14,6 +14,7 @@ const POLL_ATTEMPTS: usize = 60;
 const DEFAULT_EXPIRATION_DAYS: i64 = 30;
 const RATE_LIMIT_RETRY_ATTEMPTS: usize = 5;
 const RATE_LIMIT_RETRY_SLEEP_SECS: u64 = 60;
+const QUERY_TIMEOUT_RETRY_ATTEMPTS: usize = 3;
 const UAL_GRAPH_CONTENT_TYPE: &str = "UALGraph";
 const ENTRA_SIGNIN_CONTENT_TYPE: &str = "EntraID.SignIns";
 const ENTRA_AUDIT_CONTENT_TYPE: &str = "EntraID.DirectoryAudits";
@@ -96,12 +97,34 @@ impl GraphUALConnection {
     ) -> Result<Vec<GraphLogRecord>> {
         let mut collected = Vec::new();
         for (start_time, end_time) in runs {
-            let query_id = self.start_query(start_time, end_time).await?;
-            self.wait_for_query_completion(&query_id).await?;
-            let mut query_logs = self
-                .get_query_records(&query_id, known_blobs, skip_known_logs)
-                .await?;
-            collected.append(&mut query_logs);
+            let mut last_err = anyhow!("Graph UAL query timed out after {} attempts", QUERY_TIMEOUT_RETRY_ATTEMPTS);
+            let mut succeeded = false;
+            for attempt in 0..QUERY_TIMEOUT_RETRY_ATTEMPTS {
+                if attempt > 0 {
+                    warn!(
+                        "Graph UAL query timed out, retrying ({}/{})",
+                        attempt, QUERY_TIMEOUT_RETRY_ATTEMPTS - 1
+                    );
+                }
+                let query_id = self.start_query(start_time, end_time).await?;
+                match self.wait_for_query_completion(&query_id).await {
+                    Ok(()) => {
+                        let mut query_logs = self
+                            .get_query_records(&query_id, known_blobs, skip_known_logs)
+                            .await?;
+                        collected.append(&mut query_logs);
+                        succeeded = true;
+                        break;
+                    }
+                    Err(e) if is_query_timeout_error(&e) => {
+                        last_err = e;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            if !succeeded {
+                return Err(last_err);
+            }
         }
         Ok(collected)
     }
@@ -211,18 +234,40 @@ impl GraphUALConnection {
     ) -> Result<Vec<GraphLogRecord>> {
         let mut collected = Vec::new();
         for (start_time, end_time) in runs {
-            let query_id = self
-                .start_query_with_record_types(
-                    start_time,
-                    end_time,
-                    EXCHANGE_MAILBOX_RECORD_TYPE_FILTERS,
-                )
-                .await?;
-            self.wait_for_query_completion(&query_id).await?;
-            let mut query_logs = self
-                .get_exchange_mailbox_records(&query_id, known_blobs, skip_known_logs)
-                .await?;
-            collected.append(&mut query_logs);
+            let mut last_err = anyhow!("Graph UAL query timed out after {} attempts", QUERY_TIMEOUT_RETRY_ATTEMPTS);
+            let mut succeeded = false;
+            for attempt in 0..QUERY_TIMEOUT_RETRY_ATTEMPTS {
+                if attempt > 0 {
+                    warn!(
+                        "Graph UAL query timed out, retrying ({}/{})",
+                        attempt, QUERY_TIMEOUT_RETRY_ATTEMPTS - 1
+                    );
+                }
+                let query_id = self
+                    .start_query_with_record_types(
+                        start_time,
+                        end_time,
+                        EXCHANGE_MAILBOX_RECORD_TYPE_FILTERS,
+                    )
+                    .await?;
+                match self.wait_for_query_completion(&query_id).await {
+                    Ok(()) => {
+                        let mut query_logs = self
+                            .get_exchange_mailbox_records(&query_id, known_blobs, skip_known_logs)
+                            .await?;
+                        collected.append(&mut query_logs);
+                        succeeded = true;
+                        break;
+                    }
+                    Err(e) if is_query_timeout_error(&e) => {
+                        last_err = e;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            if !succeeded {
+                return Err(last_err);
+            }
         }
         Ok(collected)
     }
@@ -510,6 +555,10 @@ impl GraphUALConnection {
 
 fn is_rate_limited(status: u16, text: &str) -> bool {
     status == 429 || text.to_lowercase().contains("too many request")
+}
+
+fn is_query_timeout_error(e: &anyhow::Error) -> bool {
+    e.to_string().contains("timed out")
 }
 
 fn get_graph_record_id(log: &ArbitraryJson) -> String {
