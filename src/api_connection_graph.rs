@@ -345,11 +345,11 @@ impl GraphUALConnection {
             body["recordTypeFilters"] = json!(record_type_filters);
         }
         let mut last_error = String::new();
-        for attempt in 0..=RATE_LIMIT_RETRY_ATTEMPTS {
+        for attempt in 0..RATE_LIMIT_RETRY_ATTEMPTS {
             if attempt > 0 {
                 warn!(
                     "Graph API rate limited, waiting {} seconds before retry ({}/{})",
-                    RATE_LIMIT_RETRY_SLEEP_SECS, attempt, RATE_LIMIT_RETRY_ATTEMPTS
+                    RATE_LIMIT_RETRY_SLEEP_SECS, attempt, RATE_LIMIT_RETRY_ATTEMPTS - 1
                 );
                 sleep(Duration::from_secs(RATE_LIMIT_RETRY_SLEEP_SECS)).await;
             }
@@ -376,7 +376,7 @@ impl GraphUALConnection {
             return Ok(query_id.to_string());
         }
         Err(anyhow!(
-            "Graph UAL query start failed after {} retries due to rate limiting: {}",
+            "Graph UAL query start failed after {} attempts due to rate limiting: {}",
             RATE_LIMIT_RETRY_ATTEMPTS,
             last_error
         ))
@@ -475,11 +475,11 @@ impl GraphUALConnection {
     /// prefixed with `error_prefix` on failure.
     async fn get_json_with_retry(&self, url: &str, error_prefix: &str) -> Result<Value> {
         let mut last_error = String::new();
-        for attempt in 0..=RATE_LIMIT_RETRY_ATTEMPTS {
+        for attempt in 0..RATE_LIMIT_RETRY_ATTEMPTS {
             if attempt > 0 {
                 warn!(
                     "Graph API rate limited, waiting {} seconds before retry ({}/{})",
-                    RATE_LIMIT_RETRY_SLEEP_SECS, attempt, RATE_LIMIT_RETRY_ATTEMPTS
+                    RATE_LIMIT_RETRY_SLEEP_SECS, attempt, RATE_LIMIT_RETRY_ATTEMPTS - 1
                 );
                 sleep(Duration::from_secs(RATE_LIMIT_RETRY_SLEEP_SECS)).await;
             }
@@ -500,7 +500,7 @@ impl GraphUALConnection {
             return Ok(response.json::<Value>().await?);
         }
         Err(anyhow!(
-            "{} after {} retries due to rate limiting: {}",
+            "{} after {} attempts due to rate limiting: {}",
             error_prefix,
             RATE_LIMIT_RETRY_ATTEMPTS,
             last_error
