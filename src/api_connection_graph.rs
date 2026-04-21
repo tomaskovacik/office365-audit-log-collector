@@ -11,7 +11,14 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-const POLL_INTERVAL_SECS: u64 = 2;
+/// Seconds to wait between consecutive status-poll GETs for a running UAL query.
+/// Microsoft's Graph UAL queries typically take 1–5 minutes; polling more frequently
+/// than every ~10 seconds generates unnecessary requests and triggers rate limiting
+/// (the API permits ~350 GETs per 10 s tenant-wide, but long-running query polls that
+/// fire every 2 s have been observed to exhaust the quota and receive 429 responses).
+const POLL_INTERVAL_SECS: u64 = 10;
+/// Maximum number of status-poll attempts before treating the query as timed out.
+/// At 10 s per attempt this gives a 600 s (10 minute) ceiling per query.
 const POLL_ATTEMPTS: usize = 60;
 const DEFAULT_EXPIRATION_DAYS: i64 = 30;
 const RATE_LIMIT_RETRY_ATTEMPTS: usize = 5;
@@ -116,8 +123,8 @@ pub struct GraphUALConnection {
     pub headers: HeaderMap,
     pub retries: usize,
     /// Management client used for login, query creation (POST) and query status polling (GET).
-    /// Limited to a single idle connection per host so that polling requests are naturally
-    /// serialised and do not overwhelm Microsoft's per-tenant rate limits.
+    /// Uses a small connection pool; all Graph management calls in this codebase are sequential
+    /// so one idle connection per host is sufficient.
     client: reqwest::Client,
     /// Fetch client used exclusively for downloading audit-log records after a query succeeds.
     /// Keeps up to `MAX_CONCURRENT_CONNECTIONS` idle connections per host so that large
@@ -136,8 +143,8 @@ pub struct GraphLogRecord {
 }
 
 pub async fn get_graph_connection(args: CliArgs, retries: usize) -> Result<GraphUALConnection> {
-    // Management client: single idle connection per host to keep polling requests serialised
-    // and avoid hitting Microsoft's per-tenant rate limits during the status-poll phase.
+    // Management client: sequential management calls (login, query creation, status polling)
+    // need only one idle connection at a time.
     let client = reqwest::Client::builder()
         .pool_max_idle_per_host(1)
         .build()
