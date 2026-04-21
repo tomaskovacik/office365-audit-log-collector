@@ -561,7 +561,7 @@ impl GraphUALConnection {
                         sleep(Duration::from_secs(SERVER_ERROR_RETRY_SLEEP_SECS)).await;
                         continue;
                     }
-                    return Err(anyhow!("{}: {}", error_prefix, text));
+                    return Err(anyhow!("{} (url: {}): {}", error_prefix, url, text));
                 }
                 return Ok(response.json::<Value>().await?);
             }
