@@ -847,7 +847,7 @@ fn is_rate_limited(status: u16, text: &str) -> bool {
     let lower = text.to_lowercase();
     lower.contains("too many request")
         || lower.contains("please try after some time")
-        || lower.contains("\"unknownerror\"")
+        || lower.contains("unknownerror")
 }
 
 fn is_server_error(status: u16) -> bool {
