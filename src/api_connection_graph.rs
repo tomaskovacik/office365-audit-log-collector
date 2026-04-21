@@ -86,13 +86,10 @@ impl GraphRateLimiter {
             return Duration::ZERO;
         }
 
-        // Window is exhausted — caller must wait until the window resets.
-        let sleep_time = window - elapsed;
-        // Advance the window start so subsequent claims in this window don't
-        // calculate a stale elapsed time.
-        *window_start = now + sleep_time;
-        *count = 1;
-        sleep_time
+        // Window is exhausted — return the remaining time without modifying
+        // state.  After the caller sleeps for this duration the next invocation
+        // will observe elapsed >= window and start a fresh window naturally.
+        window - elapsed
     }
 }
 const UAL_GRAPH_CONTENT_TYPE: &str = "UALGraph";
@@ -113,8 +110,11 @@ pub struct GraphUALConnection {
     pub args: CliArgs,
     pub headers: HeaderMap,
     pub retries: usize,
-    /// Shared HTTP client — connection pool is capped at `MAX_CONCURRENT_CONNECTIONS`
-    /// idle connections per host to respect the Graph beta endpoint limit.
+    /// Shared HTTP client — `pool_max_idle_per_host` limits idle connections kept
+    /// in the connection pool per host.  All Graph API calls in this codebase are
+    /// sequential (no concurrent requests to the same host), so at most one active
+    /// connection to the beta endpoint exists at any time, which naturally satisfies
+    /// Microsoft's 4-concurrent-connection limit for the beta endpoint.
     client: reqwest::Client,
     /// Shared token-bucket rate limiter for the Graph beta endpoint.
     rate_limiter: Arc<Mutex<GraphRateLimiter>>,
