@@ -3,7 +3,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDateTime, Utc};
-use log::{error, warn};
+use log::warn;
 use serde_json::Value;
 use crate::config::Config;
 use crate::data_structures::{ArbitraryJson, Caches};
@@ -16,7 +16,7 @@ pub struct GraylogInterface {
 
 impl GraylogInterface {
 
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config) -> Result<Self, std::io::Error> {
 
         let address = config.output.graylog.as_ref().unwrap().address.clone();
         let port = config.output.graylog.as_ref().unwrap().port;
@@ -25,11 +25,9 @@ impl GraylogInterface {
             port
         };
 
-        // Test socket connection at startup and warn if unavailable
-        if let Err(e) = interface.get_socket() {
-            error!("Could not connect to Graylog interface on: {}:{} with: {}", interface.address, interface.port, e);
-        }
-        interface
+        // Test socket connection at startup
+        interface.get_socket()?;
+        Ok(interface)
     }
 }
 
