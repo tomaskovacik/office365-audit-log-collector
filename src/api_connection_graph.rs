@@ -6,7 +6,9 @@ use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Url;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 const POLL_INTERVAL_SECS: u64 = 2;
@@ -17,6 +19,82 @@ const RATE_LIMIT_RETRY_SLEEP_SECS: u64 = 240;
 const SERVER_ERROR_RETRY_ATTEMPTS: usize = 3;
 const SERVER_ERROR_RETRY_SLEEP_SECS: u64 = 60;
 pub const DEFAULT_QUERY_TIMEOUT_RETRIES: usize = 3;
+
+/// Maximum concurrent connections to the Graph beta endpoint (Microsoft limit).
+const MAX_CONCURRENT_CONNECTIONS: usize = 4;
+/// Maximum POST requests per rate-limit window (Microsoft limit: 25/10 s).
+const MAX_POST_PER_WINDOW: u32 = 25;
+/// Maximum GET requests per rate-limit window (Microsoft limit: 350/10 s).
+const MAX_GET_PER_WINDOW: u32 = 350;
+/// Duration of the sliding rate-limit window in seconds.
+const RATE_LIMIT_WINDOW_SECS: u64 = 10;
+
+/// Token-bucket rate limiter that tracks POST and GET request counts within a
+/// rolling 10-second window.  Each call to `claim_post` / `claim_get` either
+/// returns immediately (quota available) or returns a `Duration` that the
+/// caller must sleep before sending the request.
+struct GraphRateLimiter {
+    post_window_start: Instant,
+    post_count: u32,
+    get_window_start: Instant,
+    get_count: u32,
+}
+
+impl GraphRateLimiter {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            post_window_start: now,
+            post_count: 0,
+            get_window_start: now,
+            get_count: 0,
+        }
+    }
+
+    /// Claim one POST slot.  Returns the duration to sleep before sending.
+    fn claim_post(&mut self) -> Duration {
+        Self::claim_slot(
+            &mut self.post_count,
+            &mut self.post_window_start,
+            MAX_POST_PER_WINDOW,
+        )
+    }
+
+    /// Claim one GET slot.  Returns the duration to sleep before sending.
+    fn claim_get(&mut self) -> Duration {
+        Self::claim_slot(
+            &mut self.get_count,
+            &mut self.get_window_start,
+            MAX_GET_PER_WINDOW,
+        )
+    }
+
+    fn claim_slot(count: &mut u32, window_start: &mut Instant, max: u32) -> Duration {
+        let now = Instant::now();
+        let elapsed = now.duration_since(*window_start);
+        let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
+
+        if elapsed >= window {
+            // Start a fresh window.
+            *window_start = now;
+            *count = 1;
+            return Duration::ZERO;
+        }
+
+        if *count < max {
+            *count += 1;
+            return Duration::ZERO;
+        }
+
+        // Window is exhausted — caller must wait until the window resets.
+        let sleep_time = window - elapsed;
+        // Advance the window start so subsequent claims in this window don't
+        // calculate a stale elapsed time.
+        *window_start = now + sleep_time;
+        *count = 1;
+        sleep_time
+    }
+}
 const UAL_GRAPH_CONTENT_TYPE: &str = "UALGraph";
 const ENTRA_SIGNIN_CONTENT_TYPE: &str = "EntraID.SignIns";
 const ENTRA_AUDIT_CONTENT_TYPE: &str = "EntraID.DirectoryAudits";
@@ -35,6 +113,11 @@ pub struct GraphUALConnection {
     pub args: CliArgs,
     pub headers: HeaderMap,
     pub retries: usize,
+    /// Shared HTTP client — connection pool is capped at `MAX_CONCURRENT_CONNECTIONS`
+    /// idle connections per host to respect the Graph beta endpoint limit.
+    client: reqwest::Client,
+    /// Shared token-bucket rate limiter for the Graph beta endpoint.
+    rate_limiter: Arc<Mutex<GraphRateLimiter>>,
 }
 
 #[derive(Clone)]
@@ -46,10 +129,16 @@ pub struct GraphLogRecord {
 }
 
 pub async fn get_graph_connection(args: CliArgs, retries: usize) -> Result<GraphUALConnection> {
+    let client = reqwest::Client::builder()
+        .pool_max_idle_per_host(MAX_CONCURRENT_CONNECTIONS)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let mut api = GraphUALConnection {
         args,
         headers: HeaderMap::new(),
         retries,
+        client,
+        rate_limiter: Arc::new(Mutex::new(GraphRateLimiter::new())),
     };
     api.login().await?;
     Ok(api)
@@ -73,8 +162,7 @@ impl GraphUALConnection {
             CONTENT_TYPE,
             "application/x-www-form-urlencoded".parse().unwrap(),
         );
-        let login_client = reqwest::Client::new();
-        let response = login_client
+        let response = self.client
             .post(auth_url)
             .headers(self.headers.clone())
             .form(&params)
@@ -91,6 +179,30 @@ impl GraphUALConnection {
         self.headers.insert(AUTHORIZATION, token.parse().unwrap());
         info!("Successfully logged in to Microsoft Graph API.");
         Ok(())
+    }
+
+    /// Wait until a POST request slot is available within the rate-limit window.
+    async fn wait_for_post_rate_limit(&self) {
+        let sleep_duration = self.rate_limiter.lock().await.claim_post();
+        if !sleep_duration.is_zero() {
+            info!(
+                "Graph API POST rate limit reached, waiting {} ms before next request",
+                sleep_duration.as_millis()
+            );
+            sleep(sleep_duration).await;
+        }
+    }
+
+    /// Wait until a GET request slot is available within the rate-limit window.
+    async fn wait_for_get_rate_limit(&self) {
+        let sleep_duration = self.rate_limiter.lock().await.claim_get();
+        if !sleep_duration.is_zero() {
+            info!(
+                "Graph API GET rate limit reached, waiting {} ms before next request",
+                sleep_duration.as_millis()
+            );
+            sleep(sleep_duration).await;
+        }
     }
 
     pub async fn collect_logs(
@@ -395,14 +507,8 @@ impl GraphUALConnection {
         }
         let mut last_error = String::new();
         for attempt in 0..RATE_LIMIT_RETRY_ATTEMPTS {
-            if attempt > 0 {
-                warn!(
-                    "Graph API rate limited, waiting {} seconds before retry ({}/{})",
-                    RATE_LIMIT_RETRY_SLEEP_SECS, attempt, RATE_LIMIT_RETRY_ATTEMPTS - 1
-                );
-                sleep(Duration::from_secs(RATE_LIMIT_RETRY_SLEEP_SECS)).await;
-            }
-            let response = reqwest::Client::new()
+            self.wait_for_post_rate_limit().await;
+            let response = self.client
                 .post(url)
                 .headers(self.headers.clone())
                 .json(&body)
@@ -410,9 +516,18 @@ impl GraphUALConnection {
                 .await?;
             let status = response.status();
             if !status.is_success() {
+                let retry_after = extract_retry_after_secs(&response);
                 let text = response.text().await?;
                 if is_rate_limited(status.as_u16(), &text) {
                     last_error = text;
+                    if attempt + 1 < RATE_LIMIT_RETRY_ATTEMPTS {
+                        let wait = retry_after.unwrap_or(RATE_LIMIT_RETRY_SLEEP_SECS);
+                        warn!(
+                            "Graph API rate limited, waiting {} seconds before retry ({}/{})",
+                            wait, attempt + 1, RATE_LIMIT_RETRY_ATTEMPTS - 1
+                        );
+                        sleep(Duration::from_secs(wait)).await;
+                    }
                     continue;
                 }
                 return Err(anyhow!("Graph UAL query start failed: {}", text));
@@ -437,20 +552,23 @@ impl GraphUALConnection {
             query_id
         );
         for _ in 0..POLL_ATTEMPTS {
-            let response = reqwest::Client::new()
+            self.wait_for_get_rate_limit().await;
+            let response = self.client
                 .get(url.clone())
                 .headers(self.headers.clone())
                 .send()
                 .await?;
             let status = response.status();
             if !status.is_success() {
+                let retry_after = extract_retry_after_secs(&response);
                 let text = response.text().await?;
                 if is_rate_limited(status.as_u16(), &text) {
+                    let wait = retry_after.unwrap_or(RATE_LIMIT_RETRY_SLEEP_SECS);
                     warn!(
                         "Graph API rate limited during query status check, waiting {} seconds",
-                        RATE_LIMIT_RETRY_SLEEP_SECS
+                        wait
                     );
-                    sleep(Duration::from_secs(RATE_LIMIT_RETRY_SLEEP_SECS)).await;
+                    sleep(Duration::from_secs(wait)).await;
                     continue;
                 }
                 return Err(anyhow!("Graph UAL query status request failed: {}", text));
@@ -525,25 +643,28 @@ impl GraphUALConnection {
     async fn get_json_with_retry(&self, url: &str, error_prefix: &str) -> Result<Value> {
         let mut last_error = String::new();
         for attempt in 0..RATE_LIMIT_RETRY_ATTEMPTS {
-            if attempt > 0 {
-                warn!(
-                    "Graph API rate limited, waiting {} seconds before retry ({}/{})",
-                    RATE_LIMIT_RETRY_SLEEP_SECS, attempt, RATE_LIMIT_RETRY_ATTEMPTS - 1
-                );
-                sleep(Duration::from_secs(RATE_LIMIT_RETRY_SLEEP_SECS)).await;
-            }
+            self.wait_for_get_rate_limit().await;
             let mut server_error_attempts = 0;
             loop {
-                let response = reqwest::Client::new()
+                let response = self.client
                     .get(url)
                     .headers(self.headers.clone())
                     .send()
                     .await?;
                 let status = response.status();
                 if !status.is_success() {
+                    let retry_after = extract_retry_after_secs(&response);
                     let text = response.text().await?;
                     if is_rate_limited(status.as_u16(), &text) {
                         last_error = text;
+                        if attempt + 1 < RATE_LIMIT_RETRY_ATTEMPTS {
+                            let wait = retry_after.unwrap_or(RATE_LIMIT_RETRY_SLEEP_SECS);
+                            warn!(
+                                "Graph API rate limited, waiting {} seconds before retry ({}/{})",
+                                wait, attempt + 1, RATE_LIMIT_RETRY_ATTEMPTS - 1
+                            );
+                            sleep(Duration::from_secs(wait)).await;
+                        }
                         break;
                     }
                     if is_server_error(status.as_u16())
@@ -573,6 +694,16 @@ impl GraphUALConnection {
             last_error
         ))
     }
+}
+
+/// Extract the `Retry-After` header value (in seconds) from a response, if present.
+/// Used to honour the server's requested backoff instead of a hardcoded sleep.
+fn extract_retry_after_secs(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get("Retry-After")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
 }
 
 fn is_rate_limited(status: u16, text: &str) -> bool {
@@ -707,8 +838,10 @@ fn build_intune_filter(start_time: &str, end_time: &str) -> String {
 #[cfg(test)]
 mod tests {
     use crate::api_connection_graph::{
-        build_directory_audit_filter, build_intune_filter, build_signin_filter,
+        build_directory_audit_filter, build_intune_filter, build_signin_filter, GraphRateLimiter,
+        MAX_GET_PER_WINDOW, MAX_POST_PER_WINDOW,
     };
+    use std::time::Duration;
 
     #[test]
     fn builds_directory_audit_filter_with_categories() {
@@ -772,6 +905,60 @@ mod tests {
         assert_eq!(
             filter,
             "activityDateTime ge 2026-01-01T00:00:00Z and activityDateTime le 2026-01-01T01:00:00Z"
+        );
+    }
+
+    /// Rate limiter allows up to `MAX_POST_PER_WINDOW` POST requests in a window
+    /// without any sleep, and then enforces a delay for the next request.
+    #[test]
+    fn rate_limiter_post_allows_up_to_limit_then_blocks() {
+        let mut limiter = GraphRateLimiter::new();
+        for _ in 0..MAX_POST_PER_WINDOW {
+            assert_eq!(
+                limiter.claim_post(),
+                Duration::ZERO,
+                "should not throttle within the window"
+            );
+        }
+        let delay = limiter.claim_post();
+        assert!(
+            delay > Duration::ZERO,
+            "should enforce a delay after exhausting the POST quota"
+        );
+    }
+
+    /// Rate limiter allows up to `MAX_GET_PER_WINDOW` GET requests in a window
+    /// without any sleep, and then enforces a delay for the next request.
+    #[test]
+    fn rate_limiter_get_allows_up_to_limit_then_blocks() {
+        let mut limiter = GraphRateLimiter::new();
+        for _ in 0..MAX_GET_PER_WINDOW {
+            assert_eq!(
+                limiter.claim_get(),
+                Duration::ZERO,
+                "should not throttle within the window"
+            );
+        }
+        let delay = limiter.claim_get();
+        assert!(
+            delay > Duration::ZERO,
+            "should enforce a delay after exhausting the GET quota"
+        );
+    }
+
+    /// POST and GET quotas are tracked independently.
+    #[test]
+    fn rate_limiter_post_and_get_quotas_are_independent() {
+        let mut limiter = GraphRateLimiter::new();
+        // Exhaust the POST quota.
+        for _ in 0..MAX_POST_PER_WINDOW {
+            limiter.claim_post();
+        }
+        // GET quota should still be available.
+        assert_eq!(
+            limiter.claim_get(),
+            Duration::ZERO,
+            "GET quota must not be affected by POST exhaustion"
         );
     }
 }
