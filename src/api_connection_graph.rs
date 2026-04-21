@@ -1,7 +1,7 @@
 use crate::data_structures::{ArbitraryJson, AuthResult, CliArgs};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Url;
 use serde_json::{json, Value};
@@ -213,6 +213,10 @@ impl GraphUALConnection {
     ) -> Result<Vec<GraphLogRecord>> {
         let mut collected = Vec::new();
         for (start_time, end_time) in runs {
+            info!(
+                "Collecting Graph UAL logs for time range {} - {}",
+                start_time, end_time
+            );
             let mut last_err = anyhow!("Graph UAL query timed out after {} attempts", self.retries);
             let mut succeeded = false;
             for attempt in 0..self.retries {
@@ -228,6 +232,12 @@ impl GraphUALConnection {
                         let mut query_logs = self
                             .get_query_records(&query_id, known_blobs, skip_known_logs)
                             .await?;
+                        info!(
+                            "Successfully collected {} Graph UAL records for time range {} - {}",
+                            query_logs.len(),
+                            start_time,
+                            end_time
+                        );
                         collected.append(&mut query_logs);
                         succeeded = true;
                         break;
@@ -255,8 +265,14 @@ impl GraphUALConnection {
         let mut collected = Vec::new();
 
         for (start_time, end_time) in runs {
+            info!(
+                "Collecting Entra ID directory audit logs for time range {} - {}",
+                start_time, end_time
+            );
+            let run_start_len = collected.len();
             let mut next_page = Some(build_directory_audit_url(start_time, end_time, categories)?);
             while let Some(url) = next_page {
+                debug!("Fetching Entra ID directory audit records page");
                 let json = self
                     .get_json_with_retry(&url, "Graph Entra ID audit request failed")
                     .await?;
@@ -265,6 +281,10 @@ impl GraphUALConnection {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
+                debug!(
+                    "Retrieved {} Entra ID directory audit records on this page",
+                    records.len()
+                );
                 for record in records {
                     let map = record.as_object().cloned();
                     if map.is_none() {
@@ -287,6 +307,12 @@ impl GraphUALConnection {
                     .and_then(|v| v.as_str())
                     .map(|v| v.to_string());
             }
+            info!(
+                "Successfully collected {} Entra ID directory audit records for time range {} - {}",
+                collected.len() - run_start_len,
+                start_time,
+                end_time
+            );
         }
         Ok(collected)
     }
@@ -300,8 +326,14 @@ impl GraphUALConnection {
         let mut collected = Vec::new();
 
         for (start_time, end_time) in runs {
+            info!(
+                "Collecting Entra ID sign-in logs for time range {} - {}",
+                start_time, end_time
+            );
+            let run_start_len = collected.len();
             let mut next_page = Some(build_signin_url(start_time, end_time)?);
             while let Some(url) = next_page {
+                debug!("Fetching Entra ID sign-in records page");
                 let json = self
                     .get_json_with_retry(&url, "Graph Entra ID sign-ins request failed")
                     .await?;
@@ -310,6 +342,10 @@ impl GraphUALConnection {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
+                debug!(
+                    "Retrieved {} Entra ID sign-in records on this page",
+                    records.len()
+                );
                 for record in records {
                     let map = record.as_object().cloned();
                     if map.is_none() {
@@ -332,6 +368,12 @@ impl GraphUALConnection {
                     .and_then(|v| v.as_str())
                     .map(|v| v.to_string());
             }
+            info!(
+                "Successfully collected {} Entra ID sign-in records for time range {} - {}",
+                collected.len() - run_start_len,
+                start_time,
+                end_time
+            );
         }
         Ok(collected)
     }
@@ -350,6 +392,10 @@ impl GraphUALConnection {
     ) -> Result<Vec<GraphLogRecord>> {
         let mut collected = Vec::new();
         for (start_time, end_time) in runs {
+            info!(
+                "Collecting Exchange Mailbox Graph logs for time range {} - {}",
+                start_time, end_time
+            );
             let mut last_err = anyhow!("Graph UAL query timed out after {} attempts", self.retries);
             let mut succeeded = false;
             for attempt in 0..self.retries {
@@ -371,6 +417,12 @@ impl GraphUALConnection {
                         let mut query_logs = self
                             .get_exchange_mailbox_records(&query_id, known_blobs, skip_known_logs)
                             .await?;
+                        info!(
+                            "Successfully collected {} Exchange Mailbox Graph records for time range {} - {}",
+                            query_logs.len(),
+                            start_time,
+                            end_time
+                        );
                         collected.append(&mut query_logs);
                         succeeded = true;
                         break;
@@ -401,6 +453,10 @@ impl GraphUALConnection {
         let mut results = Vec::new();
 
         while let Some(url) = next_page {
+            debug!(
+                "Fetching Exchange Mailbox Graph records page for query {}",
+                query_id
+            );
             let json = self
                 .get_json_with_retry(&url, "Exchange Mailbox Graph UAL records request failed")
                 .await?;
@@ -409,6 +465,11 @@ impl GraphUALConnection {
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
+            debug!(
+                "Retrieved {} Exchange Mailbox Graph records on this page for query {}",
+                records.len(),
+                query_id
+            );
 
             for record in records {
                 let map = record.as_object().cloned();
@@ -432,6 +493,11 @@ impl GraphUALConnection {
                 .and_then(|v| v.as_str())
                 .map(|v| v.to_string());
         }
+        debug!(
+            "Total Exchange Mailbox Graph records retrieved for query {}: {}",
+            query_id,
+            results.len()
+        );
         Ok(results)
     }
 
@@ -452,8 +518,14 @@ impl GraphUALConnection {
         let mut collected = Vec::new();
 
         for (start_time, end_time) in runs {
+            info!(
+                "Collecting Intune audit logs for time range {} - {}",
+                start_time, end_time
+            );
+            let run_start_len = collected.len();
             let mut next_page = Some(build_intune_url(start_time, end_time)?);
             while let Some(url) = next_page {
+                debug!("Fetching Intune audit records page");
                 let json = self
                     .get_json_with_retry(&url, "Graph Intune audit events request failed")
                     .await?;
@@ -462,6 +534,10 @@ impl GraphUALConnection {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
+                debug!(
+                    "Retrieved {} Intune audit records on this page",
+                    records.len()
+                );
                 for record in records {
                     let map = record.as_object().cloned();
                     if map.is_none() {
@@ -484,6 +560,12 @@ impl GraphUALConnection {
                     .and_then(|v| v.as_str())
                     .map(|v| v.to_string());
             }
+            info!(
+                "Successfully collected {} Intune audit records for time range {} - {}",
+                collected.len() - run_start_len,
+                start_time,
+                end_time
+            );
         }
         Ok(collected)
     }
@@ -504,6 +586,15 @@ impl GraphUALConnection {
         });
         if !record_type_filters.is_empty() {
             body["recordTypeFilters"] = json!(record_type_filters);
+            debug!(
+                "Starting Graph UAL query for time range {} - {} with record type filters: {:?}",
+                start_time, end_time, record_type_filters
+            );
+        } else {
+            debug!(
+                "Starting Graph UAL query for time range {} - {}",
+                start_time, end_time
+            );
         }
         let mut last_error = String::new();
         for attempt in 0..RATE_LIMIT_RETRY_ATTEMPTS {
@@ -537,6 +628,7 @@ impl GraphUALConnection {
                 .get("id")
                 .and_then(|id| id.as_str())
                 .ok_or_else(|| anyhow!("Graph UAL query did not return an id"))?;
+            debug!("Graph UAL query started successfully with id {}", query_id);
             return Ok(query_id.to_string());
         }
         Err(anyhow!(
@@ -551,6 +643,7 @@ impl GraphUALConnection {
             "https://graph.microsoft.com/beta/security/auditLog/queries/{}",
             query_id
         );
+        debug!("Polling Graph UAL query {} for completion", query_id);
         for _ in 0..POLL_ATTEMPTS {
             self.wait_for_get_rate_limit().await;
             let response = self.client
@@ -579,7 +672,9 @@ impl GraphUALConnection {
                 .and_then(|s| s.as_str())
                 .unwrap_or("")
                 .to_lowercase();
+            debug!("Graph UAL query {} status: {}", query_id, status);
             if status == "succeeded" {
+                info!("Graph UAL query {} completed successfully", query_id);
                 return Ok(());
             }
             if status == "failed" || status == "cancelled" {
@@ -603,6 +698,7 @@ impl GraphUALConnection {
         let mut results = Vec::new();
 
         while let Some(url) = next_page {
+            debug!("Fetching Graph UAL records page for query {}", query_id);
             let json = self
                 .get_json_with_retry(&url, "Graph UAL records request failed")
                 .await?;
@@ -611,6 +707,11 @@ impl GraphUALConnection {
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
+            debug!(
+                "Retrieved {} Graph UAL records on this page for query {}",
+                records.len(),
+                query_id
+            );
 
             for record in records {
                 let map = record.as_object().cloned();
@@ -634,6 +735,11 @@ impl GraphUALConnection {
                 .and_then(|v| v.as_str())
                 .map(|v| v.to_string());
         }
+        debug!(
+            "Total Graph UAL records retrieved for query {}: {}",
+            query_id,
+            results.len()
+        );
         Ok(results)
     }
 
@@ -641,6 +747,7 @@ impl GraphUALConnection {
     /// errors (5xx). Returns the parsed JSON `Value` on success, or an error prefixed with
     /// `error_prefix` on failure.
     async fn get_json_with_retry(&self, url: &str, error_prefix: &str) -> Result<Value> {
+        debug!("Graph API GET request to: {}", url);
         let mut last_error = String::new();
         for attempt in 0..RATE_LIMIT_RETRY_ATTEMPTS {
             self.wait_for_get_rate_limit().await;
