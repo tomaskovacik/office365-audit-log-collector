@@ -14,6 +14,8 @@ const POLL_ATTEMPTS: usize = 60;
 const DEFAULT_EXPIRATION_DAYS: i64 = 30;
 const RATE_LIMIT_RETRY_ATTEMPTS: usize = 5;
 const RATE_LIMIT_RETRY_SLEEP_SECS: u64 = 60;
+const SERVER_ERROR_RETRY_ATTEMPTS: usize = 3;
+const SERVER_ERROR_RETRY_SLEEP_SECS: u64 = 10;
 pub const DEFAULT_QUERY_TIMEOUT_RETRIES: usize = 3;
 const UAL_GRAPH_CONTENT_TYPE: &str = "UALGraph";
 const ENTRA_SIGNIN_CONTENT_TYPE: &str = "EntraID.SignIns";
@@ -517,9 +519,9 @@ impl GraphUALConnection {
         Ok(results)
     }
 
-    /// Performs a GET request to `url`, retrying up to `RATE_LIMIT_RETRY_ATTEMPTS` times when a
-    /// rate-limit response is received. Returns the parsed JSON `Value` on success, or an error
-    /// prefixed with `error_prefix` on failure.
+    /// Performs a GET request to `url`, retrying on rate-limit responses and on transient server
+    /// errors (5xx). Returns the parsed JSON `Value` on success, or an error prefixed with
+    /// `error_prefix` on failure.
     async fn get_json_with_retry(&self, url: &str, error_prefix: &str) -> Result<Value> {
         let mut last_error = String::new();
         for attempt in 0..RATE_LIMIT_RETRY_ATTEMPTS {
@@ -530,21 +532,39 @@ impl GraphUALConnection {
                 );
                 sleep(Duration::from_secs(RATE_LIMIT_RETRY_SLEEP_SECS)).await;
             }
-            let response = reqwest::Client::new()
-                .get(url)
-                .headers(self.headers.clone())
-                .send()
-                .await?;
-            let status = response.status();
-            if !status.is_success() {
-                let text = response.text().await?;
-                if is_rate_limited(status.as_u16(), &text) {
-                    last_error = text;
-                    continue;
+            let mut server_error_attempts = 0;
+            loop {
+                let response = reqwest::Client::new()
+                    .get(url)
+                    .headers(self.headers.clone())
+                    .send()
+                    .await?;
+                let status = response.status();
+                if !status.is_success() {
+                    let text = response.text().await?;
+                    if is_rate_limited(status.as_u16(), &text) {
+                        last_error = text;
+                        break;
+                    }
+                    if is_server_error(status.as_u16())
+                        && server_error_attempts < SERVER_ERROR_RETRY_ATTEMPTS
+                    {
+                        server_error_attempts += 1;
+                        warn!(
+                            "Graph API returned server error ({}), waiting {} seconds before retry ({}/{}): {}",
+                            status.as_u16(),
+                            SERVER_ERROR_RETRY_SLEEP_SECS,
+                            server_error_attempts,
+                            SERVER_ERROR_RETRY_ATTEMPTS,
+                            text
+                        );
+                        sleep(Duration::from_secs(SERVER_ERROR_RETRY_SLEEP_SECS)).await;
+                        continue;
+                    }
+                    return Err(anyhow!("{}: {}", error_prefix, text));
                 }
-                return Err(anyhow!("{}: {}", error_prefix, text));
+                return Ok(response.json::<Value>().await?);
             }
-            return Ok(response.json::<Value>().await?);
         }
         Err(anyhow!(
             "{} after {} attempts due to rate limiting: {}",
@@ -557,6 +577,10 @@ impl GraphUALConnection {
 
 fn is_rate_limited(status: u16, text: &str) -> bool {
     status == 429 || text.to_lowercase().contains("too many request")
+}
+
+fn is_server_error(status: u16) -> bool {
+    (500..600).contains(&status)
 }
 
 fn is_query_timeout_error(e: &anyhow::Error) -> bool {
