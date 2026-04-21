@@ -11,7 +11,14 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-const POLL_INTERVAL_SECS: u64 = 2;
+/// Seconds to wait between consecutive status-poll GETs for a running UAL query.
+/// Microsoft's Graph UAL queries typically take 1–5 minutes; polling more frequently
+/// than every ~10 seconds generates unnecessary requests and triggers rate limiting
+/// (the API permits ~350 GETs per 10 s tenant-wide, but long-running query polls that
+/// fire every 2 s have been observed to exhaust the quota and receive 429 responses).
+const POLL_INTERVAL_SECS: u64 = 10;
+/// Maximum number of status-poll attempts before treating the query as timed out.
+/// At 10 s per attempt this gives a 600 s (10 minute) ceiling per query.
 const POLL_ATTEMPTS: usize = 60;
 const DEFAULT_EXPIRATION_DAYS: i64 = 30;
 const RATE_LIMIT_RETRY_ATTEMPTS: usize = 5;
@@ -115,12 +122,14 @@ pub struct GraphUALConnection {
     pub args: CliArgs,
     pub headers: HeaderMap,
     pub retries: usize,
-    /// Shared HTTP client — `pool_max_idle_per_host` limits idle connections kept
-    /// in the connection pool per host.  All Graph API calls in this codebase are
-    /// sequential (no concurrent requests to the same host), so at most one active
-    /// connection to the beta endpoint exists at any time, which naturally satisfies
-    /// Microsoft's 4-concurrent-connection limit for the beta endpoint.
+    /// Management client used for login, query creation (POST) and query status polling (GET).
+    /// Uses a small connection pool; all Graph management calls in this codebase are sequential
+    /// so one idle connection per host is sufficient.
     client: reqwest::Client,
+    /// Fetch client used exclusively for downloading audit-log records after a query succeeds.
+    /// Keeps up to `MAX_CONCURRENT_CONNECTIONS` idle connections per host so that large
+    /// paginated result sets can be retrieved efficiently.
+    fetch_client: reqwest::Client,
     /// Shared token-bucket rate limiter for the Graph beta endpoint.
     rate_limiter: Arc<Mutex<GraphRateLimiter>>,
 }
@@ -134,7 +143,14 @@ pub struct GraphLogRecord {
 }
 
 pub async fn get_graph_connection(args: CliArgs, retries: usize) -> Result<GraphUALConnection> {
+    // Management client: sequential management calls (login, query creation, status polling)
+    // need only one idle connection at a time.
     let client = reqwest::Client::builder()
+        .pool_max_idle_per_host(1)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    // Fetch client: larger connection pool for downloading paginated record sets efficiently.
+    let fetch_client = reqwest::Client::builder()
         .pool_max_idle_per_host(MAX_CONCURRENT_CONNECTIONS)
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
@@ -143,6 +159,7 @@ pub async fn get_graph_connection(args: CliArgs, retries: usize) -> Result<Graph
         headers: HeaderMap::new(),
         retries,
         client,
+        fetch_client,
         rate_limiter: Arc::new(Mutex::new(GraphRateLimiter::new())),
     };
     api.login().await?;
@@ -279,7 +296,7 @@ impl GraphUALConnection {
             while let Some(url) = next_page {
                 debug!("Fetching Entra ID directory audit records page");
                 let json = self
-                    .get_json_with_retry(&url, "Graph Entra ID audit request failed")
+                    .get_json_with_retry(&self.fetch_client, &url, "Graph Entra ID audit request failed")
                     .await?;
                 let records = json
                     .get("value")
@@ -340,7 +357,7 @@ impl GraphUALConnection {
             while let Some(url) = next_page {
                 debug!("Fetching Entra ID sign-in records page");
                 let json = self
-                    .get_json_with_retry(&url, "Graph Entra ID sign-ins request failed")
+                    .get_json_with_retry(&self.fetch_client, &url, "Graph Entra ID sign-ins request failed")
                     .await?;
                 let records = json
                     .get("value")
@@ -463,7 +480,7 @@ impl GraphUALConnection {
                 query_id
             );
             let json = self
-                .get_json_with_retry(&url, "Exchange Mailbox Graph UAL records request failed")
+                .get_json_with_retry(&self.fetch_client, &url, "Exchange Mailbox Graph UAL records request failed")
                 .await?;
             let records = json
                 .get("value")
@@ -532,7 +549,7 @@ impl GraphUALConnection {
             while let Some(url) = next_page {
                 debug!("Fetching Intune audit records page");
                 let json = self
-                    .get_json_with_retry(&url, "Graph Intune audit events request failed")
+                    .get_json_with_retry(&self.fetch_client, &url, "Graph Intune audit events request failed")
                     .await?;
                 let records = json
                     .get("value")
@@ -705,7 +722,7 @@ impl GraphUALConnection {
         while let Some(url) = next_page {
             debug!("Fetching Graph UAL records page for query {}", query_id);
             let json = self
-                .get_json_with_retry(&url, "Graph UAL records request failed")
+                .get_json_with_retry(&self.fetch_client, &url, "Graph UAL records request failed")
                 .await?;
             let records = json
                 .get("value")
@@ -748,17 +765,22 @@ impl GraphUALConnection {
         Ok(results)
     }
 
-    /// Performs a GET request to `url`, retrying on rate-limit responses and on transient server
-    /// errors (5xx). Returns the parsed JSON `Value` on success, or an error prefixed with
-    /// `error_prefix` on failure.
-    async fn get_json_with_retry(&self, url: &str, error_prefix: &str) -> Result<Value> {
+    /// Performs a GET request to `url` using the supplied `client`, retrying on rate-limit
+    /// responses and on transient server errors (5xx). Returns the parsed JSON `Value` on
+    /// success, or an error prefixed with `error_prefix` on failure.
+    async fn get_json_with_retry(
+        &self,
+        client: &reqwest::Client,
+        url: &str,
+        error_prefix: &str,
+    ) -> Result<Value> {
         debug!("Graph API GET request to: {}", url);
         let mut last_error = String::new();
         for attempt in 0..RATE_LIMIT_RETRY_ATTEMPTS {
             self.wait_for_get_rate_limit().await;
             let mut server_error_attempts = 0;
             loop {
-                let response = self.client
+                let response = client
                     .get(url)
                     .headers(self.headers.clone())
                     .send()
