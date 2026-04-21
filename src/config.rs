@@ -34,10 +34,6 @@ impl Config {
     pub fn get_time_ranges(&self) -> Vec<(String, String)> {
         let end_time = chrono::Utc::now();
         let hours_to_collect = self.collect.hours_to_collect.unwrap_or(24);
-        if hours_to_collect > 168 {
-            panic!("Hours to collect cannot be more than 168 due to Office API limits");
-        }
-
         let mut ranges = Vec::new();
         let mut start_time = end_time - chrono::Duration::try_hours(hours_to_collect).unwrap();
         while end_time - start_time > chrono::Duration::try_hours(24).unwrap() {
