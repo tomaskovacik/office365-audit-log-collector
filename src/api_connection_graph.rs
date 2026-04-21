@@ -19,6 +19,11 @@ const RATE_LIMIT_RETRY_SLEEP_SECS: u64 = 600;
 const SERVER_ERROR_RETRY_ATTEMPTS: usize = 3;
 const SERVER_ERROR_RETRY_SLEEP_SECS: u64 = 60;
 pub const DEFAULT_QUERY_TIMEOUT_RETRIES: usize = 3;
+/// Maximum number of records to request per page when fetching UAL records from the
+/// Microsoft Graph API.  Microsoft supports up to 50,000 items per page for the
+/// `security/auditLog/queries/{id}/records` endpoint, matching the behaviour of the
+/// reference PowerShell script (Get-UAL.ps1 `$MaxItemsPerInterval = 50000`).
+pub(crate) const UAL_RECORDS_PAGE_SIZE: usize = 50000;
 
 /// Maximum concurrent connections to the Graph beta endpoint (Microsoft limit).
 const MAX_CONCURRENT_CONNECTIONS: usize = 4;
@@ -447,8 +452,8 @@ impl GraphUALConnection {
         skip_known_logs: bool,
     ) -> Result<Vec<GraphLogRecord>> {
         let mut next_page = Some(format!(
-            "https://graph.microsoft.com/beta/security/auditLog/queries/{}/records",
-            query_id
+            "https://graph.microsoft.com/beta/security/auditLog/queries/{}/records?$top={}",
+            query_id, UAL_RECORDS_PAGE_SIZE
         ));
         let mut results = Vec::new();
 
@@ -692,8 +697,8 @@ impl GraphUALConnection {
         skip_known_logs: bool,
     ) -> Result<Vec<GraphLogRecord>> {
         let mut next_page = Some(format!(
-            "https://graph.microsoft.com/beta/security/auditLog/queries/{}/records",
-            query_id
+            "https://graph.microsoft.com/beta/security/auditLog/queries/{}/records?$top={}",
+            query_id, UAL_RECORDS_PAGE_SIZE
         ));
         let mut results = Vec::new();
 
@@ -950,7 +955,7 @@ fn build_intune_filter(start_time: &str, end_time: &str) -> String {
 mod tests {
     use crate::api_connection_graph::{
         build_directory_audit_filter, build_intune_filter, build_signin_filter, GraphRateLimiter,
-        MAX_GET_PER_WINDOW, MAX_POST_PER_WINDOW,
+        MAX_GET_PER_WINDOW, MAX_POST_PER_WINDOW, UAL_RECORDS_PAGE_SIZE,
     };
     use std::time::Duration;
 
@@ -1070,6 +1075,24 @@ mod tests {
             limiter.claim_get(),
             Duration::ZERO,
             "GET quota must not be affected by POST exhaustion"
+        );
+    }
+
+    #[test]
+    fn ual_records_page_size_is_50000() {
+        assert_eq!(UAL_RECORDS_PAGE_SIZE, 50000);
+    }
+
+    #[test]
+    fn ual_records_url_includes_top_parameter() {
+        let query_id = "test-query-id";
+        let url = format!(
+            "https://graph.microsoft.com/beta/security/auditLog/queries/{}/records?$top={}",
+            query_id, UAL_RECORDS_PAGE_SIZE
+        );
+        assert!(
+            url.contains("$top=50000"),
+            "Records URL must include $top=50000 for batch fetching"
         );
     }
 }
