@@ -22,7 +22,7 @@ jobs:
       #
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set up Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Build application
@@ -65,7 +65,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set up Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Build Linux binary
