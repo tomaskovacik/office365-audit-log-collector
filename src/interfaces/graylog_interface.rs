@@ -3,7 +3,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDateTime, Utc};
-use log::{warn};
+use log::{error, warn};
 use serde_json::Value;
 use crate::config::Config;
 use crate::data_structures::{ArbitraryJson, Caches};
@@ -25,24 +25,23 @@ impl GraylogInterface {
             port
         };
 
-        // Test socket, if we cannot connect there's no point in running
-        let _ = interface.get_socket();
+        // Test socket connection at startup and warn if unavailable
+        if let Err(e) = interface.get_socket() {
+            error!("Could not connect to Graylog interface on: {}:{} with: {}", interface.address, interface.port, e);
+        }
         interface
     }
 }
 
 impl GraylogInterface {
-    fn get_socket(&self) -> TcpStream {
+    fn get_socket(&self) -> Result<TcpStream, std::io::Error> {
 
         let ip_addr = (self.address.clone(), self.port)
             .to_socket_addrs()
-            .expect("Unable to resolve the IP address")
+            .map_err(|e| std::io::Error::new(e.kind(), format!("Unable to resolve the IP address: {}", e)))?
             .next()
-            .expect("DNS resolution returned no IP addresses");
-        TcpStream::connect_timeout(&ip_addr, Duration::from_secs(10)).unwrap_or_else(
-            |e| panic!("Could not connect to Graylog interface on: {}:{} with: {}",
-                       self.address, self.port, e)
-        )
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "DNS resolution returned no IP addresses"))?;
+        TcpStream::connect_timeout(&ip_addr, Duration::from_secs(10))
     }
 }
 
@@ -65,11 +64,15 @@ impl Interface for GraylogInterface {
 
                 match serde_json::to_string(log) {
                     Ok(json) => {
-                        let mut socket = self.get_socket();
-                        socket.write_all(&json.as_bytes()).unwrap_or_else(
-                            |e| warn!("Could not send log to Graylog interface: {}", e));
-                        socket.flush().unwrap_or_else(
-                            |e| warn!("Could not send log to Graylog interface: {}", e));
+                        match self.get_socket() {
+                            Ok(mut socket) => {
+                                socket.write_all(json.as_bytes()).unwrap_or_else(
+                                    |e| warn!("Could not send log to Graylog interface: {}", e));
+                                socket.flush().unwrap_or_else(
+                                    |e| warn!("Could not send log to Graylog interface: {}", e));
+                            }
+                            Err(e) => warn!("Could not connect to Graylog interface on: {}:{} with: {}", self.address, self.port, e),
+                        }
                     }
                     Err(e) => warn!("Could not serialize a log in Graylog interface: {}.", e)
                 }
