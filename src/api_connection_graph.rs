@@ -15,7 +15,7 @@ const POLL_INTERVAL_SECS: u64 = 2;
 const POLL_ATTEMPTS: usize = 60;
 const DEFAULT_EXPIRATION_DAYS: i64 = 30;
 const RATE_LIMIT_RETRY_ATTEMPTS: usize = 5;
-const RATE_LIMIT_RETRY_SLEEP_SECS: u64 = 240;
+const RATE_LIMIT_RETRY_SLEEP_SECS: u64 = 600;
 const SERVER_ERROR_RETRY_ATTEMPTS: usize = 3;
 const SERVER_ERROR_RETRY_SLEEP_SECS: u64 = 60;
 pub const DEFAULT_QUERY_TIMEOUT_RETRIES: usize = 3;
@@ -814,7 +814,11 @@ fn extract_retry_after_secs(response: &reqwest::Response) -> Option<u64> {
 }
 
 fn is_rate_limited(status: u16, text: &str) -> bool {
-    status == 429 || text.to_lowercase().contains("too many request")
+    if status == 429 {
+        return true;
+    }
+    let lower = text.to_lowercase();
+    lower.contains("too many request") || lower.contains("please try after some time")
 }
 
 fn is_server_error(status: u16) -> bool {
