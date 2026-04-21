@@ -105,7 +105,10 @@ impl Collector {
             || exchange_mailbox_enabled
             || intune_enabled
         {
-            let graph_connection = api_connection_graph::get_graph_connection(args.clone()).await?;
+            let graph_connection = api_connection_graph::get_graph_connection(
+                args.clone(),
+                config.collect.retries.unwrap_or(api_connection_graph::DEFAULT_QUERY_TIMEOUT_RETRIES),
+            ).await?;
             let skip_known_logs = config.collect.skip_known_logs.unwrap_or(true);
 
             if config.collect.content_types.graph_ual_enabled() {
