@@ -72,7 +72,26 @@ impl Collector {
             interfaces.push(Box::new(FluentdInterface::new(config.clone())));
         }
         if config.output.graylog.is_some() {
-            interfaces.push(Box::new(GraylogInterface::new(config.clone())));
+            let is_only_output = config.output.file.is_none()
+                && config.output.fluentd.is_none()
+                && config.output.oms.is_none()
+                && !args.interactive;
+            let graylog_cfg = config.output.graylog.as_ref().unwrap();
+            match GraylogInterface::new(config.clone()) {
+                Ok(interface) => interfaces.push(Box::new(interface)),
+                Err(e) => {
+                    if is_only_output {
+                        return Err(anyhow::anyhow!(
+                            "Could not connect to Graylog interface on: {}:{} with: {} (Graylog is the only configured output)",
+                            graylog_cfg.address,
+                            graylog_cfg.port,
+                            e
+                        ));
+                    } else {
+                        error!("Could not connect to Graylog interface on: {}:{} with: {}", graylog_cfg.address, graylog_cfg.port, e);
+                    }
+                }
+            }
         }
         if config.output.oms.is_some() {
             interfaces.push(Box::new(OmsInterface::new(
