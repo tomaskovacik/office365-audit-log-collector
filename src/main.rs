@@ -36,7 +36,7 @@ async fn main() {
             Ok(mut collector) => collector.monitor().await,
             Err(e) => {
                 error!("Could not start collector: {}", e);
-                panic!("Could not start collector: {}", e);
+                std::process::exit(1);
             }
         }
     }
