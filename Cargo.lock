@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "office_audit_log_collector"
-version = "2.6.2"
+version = "2.6.3"
 dependencies = [
  "anyhow",
  "async-trait",
