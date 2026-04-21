@@ -20,7 +20,7 @@ const SERVER_ERROR_RETRY_ATTEMPTS: usize = 3;
 const SERVER_ERROR_RETRY_SLEEP_SECS: u64 = 60;
 pub const DEFAULT_QUERY_TIMEOUT_RETRIES: usize = 3;
 /// Maximum number of records to request per page when fetching UAL records from the
-/// Microsoft Graph API.  Microsoft supports up to 50 000 items per page for the
+/// Microsoft Graph API.  Microsoft supports up to 50,000 items per page for the
 /// `security/auditLog/queries/{id}/records` endpoint, matching the behaviour of the
 /// reference PowerShell script (Get-UAL.ps1 `$MaxItemsPerInterval = 50000`).
 pub(crate) const UAL_RECORDS_PAGE_SIZE: usize = 50000;
