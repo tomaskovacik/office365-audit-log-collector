@@ -25,10 +25,21 @@ impl Config {
 
     pub fn get_needed_runs(&self) -> HashMap<String, Vec<(String, String)>> {
         let mut runs: HashMap<String, Vec<(String, String)>> = HashMap::new();
-        for content_type in self.collect.content_types.get_content_type_strings() {
+        for content_type in self.collect.content_types.get_management_content_type_strings() {
+            runs.insert(content_type, self.get_management_time_ranges());
+        }
+        for content_type in self.collect.content_types.get_graph_content_type_strings() {
             runs.insert(content_type, self.get_time_ranges());
         }
         runs
+    }
+
+    pub fn get_management_time_ranges(&self) -> Vec<(String, String)> {
+        let hours_to_collect = self.collect.hours_to_collect.unwrap_or(24);
+        if hours_to_collect > 168 {
+            panic!("Hours to collect cannot be more than 168 for Office Management API content types");
+        }
+        self.get_time_ranges()
     }
 
     pub fn get_time_ranges(&self) -> Vec<(String, String)> {
@@ -214,6 +225,12 @@ impl ContentTypesSubConfig {
 
     pub fn get_content_type_strings(&self) -> Vec<String> {
         let mut results = self.get_management_content_type_strings();
+        results.extend(self.get_graph_content_type_strings());
+        results
+    }
+
+    pub fn get_graph_content_type_strings(&self) -> Vec<String> {
+        let mut results = Vec::new();
         if self.graph_ual_enabled() {
             results.push("UALGraph".to_string());
         }
