@@ -229,7 +229,7 @@ impl GraphUALConnection {
 
     pub async fn collect_logs(
         &self,
-        runs: &Vec<(String, String)>,
+        runs: &[(String, String)],
         known_blobs: &HashMap<String, String>,
         skip_known_logs: bool,
     ) -> Result<Vec<GraphLogRecord>> {
@@ -279,7 +279,7 @@ impl GraphUALConnection {
 
     pub async fn collect_entra_directory_audit_logs(
         &self,
-        runs: &Vec<(String, String)>,
+        runs: &[(String, String)],
         categories: &[String],
         known_blobs: &HashMap<String, String>,
         skip_known_logs: bool,
@@ -341,7 +341,7 @@ impl GraphUALConnection {
 
     pub async fn collect_entra_signin_logs(
         &self,
-        runs: &Vec<(String, String)>,
+        runs: &[(String, String)],
         known_blobs: &HashMap<String, String>,
         skip_known_logs: bool,
     ) -> Result<Vec<GraphLogRecord>> {
@@ -408,7 +408,7 @@ impl GraphUALConnection {
     /// Required Graph permission: `AuditLogsQuery.Read.All`
     pub async fn collect_exchange_mailbox_logs(
         &self,
-        runs: &Vec<(String, String)>,
+        runs: &[(String, String)],
         known_blobs: &HashMap<String, String>,
         skip_known_logs: bool,
     ) -> Result<Vec<GraphLogRecord>> {
@@ -533,7 +533,7 @@ impl GraphUALConnection {
     /// `DeviceManagementConfiguration.Read.All`
     pub async fn collect_intune_logs(
         &self,
-        runs: &Vec<(String, String)>,
+        runs: &[(String, String)],
         known_blobs: &HashMap<String, String>,
         skip_known_logs: bool,
     ) -> Result<Vec<GraphLogRecord>> {
