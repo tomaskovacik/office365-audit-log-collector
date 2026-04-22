@@ -710,6 +710,7 @@ impl GraphUALConnection {
         );
         debug!("Polling Graph UAL query {} for completion", query_id);
         let mut transport_error_attempts = 0;
+        let mut token_refresh_attempts = 0;
         for _ in 0..POLL_ATTEMPTS {
             self.wait_for_get_rate_limit().await;
             let response = match self.client
@@ -750,12 +751,16 @@ impl GraphUALConnection {
                     continue;
                 }
                 if is_auth_error(status.as_u16(), &text) {
-                    warn!(
-                        "Graph API authentication token expired during query status poll for {}, refreshing token and retrying",
-                        query_id
-                    );
-                    self.refresh_token().await?;
-                    continue;
+                    if token_refresh_attempts < SERVER_ERROR_RETRY_ATTEMPTS {
+                        token_refresh_attempts += 1;
+                        warn!(
+                            "Graph API authentication token expired during query status poll for {}, refreshing token and retrying ({}/{})",
+                            query_id, token_refresh_attempts, SERVER_ERROR_RETRY_ATTEMPTS
+                        );
+                        self.refresh_token().await?;
+                        continue;
+                    }
+                    return Err(anyhow!("Graph UAL query status request failed: {}", text));
                 }
                 return Err(anyhow!("Graph UAL query status request failed: {}", text));
             }
@@ -953,6 +958,9 @@ fn is_rate_limited(status: u16, text: &str) -> bool {
 }
 
 fn is_auth_error(status: u16, text: &str) -> bool {
+    // HTTP 401 is the standard status for an expired/invalid bearer token.
+    // Microsoft Graph also embeds "InvalidAuthenticationToken" in the JSON body
+    // alongside other status codes (e.g. 401) when the token lifetime has elapsed.
     if status == 401 {
         return true;
     }
