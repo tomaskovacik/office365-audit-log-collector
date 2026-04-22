@@ -120,7 +120,11 @@ pub(crate) const EXCHANGE_MAILBOX_RECORD_TYPE_FILTERS: &[&str] =
 #[derive(Clone)]
 pub struct GraphUALConnection {
     pub args: CliArgs,
-    pub headers: HeaderMap,
+    /// Shared authentication headers (Authorization, Content-Type).  Wrapped in an
+    /// `Arc<Mutex<…>>` so that `refresh_token` can update the bearer token from
+    /// `&self` methods (e.g. the query-status polling loop) without requiring a
+    /// mutable borrow.  All clones of a `GraphUALConnection` share the same headers.
+    headers: Arc<Mutex<HeaderMap>>,
     pub retries: usize,
     /// Management client used for login, query creation (POST) and query status polling (GET).
     /// Uses a small connection pool; all Graph management calls in this codebase are sequential
@@ -156,7 +160,7 @@ pub async fn get_graph_connection(args: CliArgs, retries: usize) -> Result<Graph
         .unwrap_or_else(|_| reqwest::Client::new());
     let mut api = GraphUALConnection {
         args,
-        headers: HeaderMap::new(),
+        headers: Arc::new(Mutex::new(HeaderMap::new())),
         retries,
         client,
         fetch_client,
@@ -169,6 +173,21 @@ pub async fn get_graph_connection(args: CliArgs, retries: usize) -> Result<Graph
 impl GraphUALConnection {
     pub async fn login(&mut self) -> Result<()> {
         info!("Logging in to Microsoft Graph API.");
+        // Seed the stored headers with Content-Type so subsequent non-JSON requests
+        // inherit a reasonable default (the bearer token is inserted by refresh_token).
+        self.headers
+            .lock()
+            .await
+            .insert(CONTENT_TYPE, "application/x-www-form-urlencoded".parse().unwrap());
+        self.refresh_token().await?;
+        info!("Successfully logged in to Microsoft Graph API.");
+        Ok(())
+    }
+
+    /// Request a new bearer token from Azure AD and update the stored Authorization header.
+    /// Takes `&self` so it can be called from immutable contexts (e.g. the query-status
+    /// polling loop) without requiring a mutable borrow of the whole connection.
+    async fn refresh_token(&self) -> Result<()> {
         let auth_url = format!(
             "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
             self.args.tenant_id
@@ -180,26 +199,20 @@ impl GraphUALConnection {
             ("client_secret", &self.args.secret_key),
             ("scope", scope),
         ];
-        self.headers.insert(
-            CONTENT_TYPE,
-            "application/x-www-form-urlencoded".parse().unwrap(),
-        );
         let response = self.client
             .post(auth_url)
-            .headers(self.headers.clone())
             .form(&params)
             .send()
             .await?;
         if !response.status().is_success() {
             let text = response.text().await?;
-            let msg = format!("Received error response to Graph API login: {}", text);
+            let msg = format!("Failed to refresh Graph API token: {}", text);
             error!("{}", msg);
             return Err(anyhow!("{}", msg));
         }
         let json = response.json::<AuthResult>().await?;
         let token = format!("bearer {}", json.access_token);
-        self.headers.insert(AUTHORIZATION, token.parse().unwrap());
-        info!("Successfully logged in to Microsoft Graph API.");
+        self.headers.lock().await.insert(AUTHORIZATION, token.parse().unwrap());
         Ok(())
     }
 
@@ -623,7 +636,7 @@ impl GraphUALConnection {
             self.wait_for_post_rate_limit().await;
             let send_result = self.client
                 .post(url)
-                .headers(self.headers.clone())
+                .headers(self.headers.lock().await.clone())
                 .json(&body)
                 .send()
                 .await;
@@ -661,6 +674,18 @@ impl GraphUALConnection {
                     }
                     continue;
                 }
+                if is_auth_error(status.as_u16(), &text) {
+                    last_error = text;
+                    if attempt + 1 < RATE_LIMIT_RETRY_ATTEMPTS {
+                        warn!(
+                            "Graph API authentication token expired during query start, refreshing token and retrying ({}/{})",
+                            attempt + 1,
+                            RATE_LIMIT_RETRY_ATTEMPTS - 1
+                        );
+                        self.refresh_token().await?;
+                    }
+                    continue;
+                }
                 return Err(anyhow!("Graph UAL query start failed: {}", text));
             }
             let json = response.json::<Value>().await?;
@@ -685,11 +710,12 @@ impl GraphUALConnection {
         );
         debug!("Polling Graph UAL query {} for completion", query_id);
         let mut transport_error_attempts = 0;
+        let mut token_refresh_attempts = 0;
         for _ in 0..POLL_ATTEMPTS {
             self.wait_for_get_rate_limit().await;
             let response = match self.client
                 .get(url.clone())
-                .headers(self.headers.clone())
+                .headers(self.headers.lock().await.clone())
                 .send()
                 .await
             {
@@ -723,6 +749,18 @@ impl GraphUALConnection {
                     );
                     sleep(Duration::from_secs(wait)).await;
                     continue;
+                }
+                if is_auth_error(status.as_u16(), &text) {
+                    if token_refresh_attempts < SERVER_ERROR_RETRY_ATTEMPTS {
+                        token_refresh_attempts += 1;
+                        warn!(
+                            "Graph API authentication token expired during query status poll for {}, refreshing token and retrying ({}/{})",
+                            query_id, token_refresh_attempts, SERVER_ERROR_RETRY_ATTEMPTS
+                        );
+                        self.refresh_token().await?;
+                        continue;
+                    }
+                    return Err(anyhow!("Graph UAL query status request failed: {}", text));
                 }
                 return Err(anyhow!("Graph UAL query status request failed: {}", text));
             }
@@ -820,7 +858,7 @@ impl GraphUALConnection {
             loop {
                 let response = match client
                     .get(url)
-                    .headers(self.headers.clone())
+                    .headers(self.headers.lock().await.clone())
                     .send()
                     .await
                 {
@@ -873,6 +911,18 @@ impl GraphUALConnection {
                         sleep(Duration::from_secs(SERVER_ERROR_RETRY_SLEEP_SECS)).await;
                         continue;
                     }
+                    if is_auth_error(status.as_u16(), &text) {
+                        last_error = text;
+                        if attempt + 1 < RATE_LIMIT_RETRY_ATTEMPTS {
+                            warn!(
+                                "Graph API authentication token expired, refreshing token and retrying ({}/{})",
+                                attempt + 1,
+                                RATE_LIMIT_RETRY_ATTEMPTS - 1
+                            );
+                            self.refresh_token().await?;
+                        }
+                        break;
+                    }
                     return Err(anyhow!("{} (url: {}): {}", error_prefix, url, text));
                 }
                 return Ok(response.json::<Value>().await?);
@@ -905,6 +955,16 @@ fn is_rate_limited(status: u16, text: &str) -> bool {
     lower.contains("too many request")
         || lower.contains("please try after some time")
         || lower.contains("unknownerror")
+}
+
+fn is_auth_error(status: u16, text: &str) -> bool {
+    // HTTP 401 is the standard status for an expired/invalid bearer token.
+    // Microsoft Graph also embeds "InvalidAuthenticationToken" in the JSON body
+    // alongside other status codes (e.g. 401) when the token lifetime has elapsed.
+    if status == 401 {
+        return true;
+    }
+    text.contains("InvalidAuthenticationToken")
 }
 
 fn is_server_error(status: u16) -> bool {
