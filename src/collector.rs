@@ -1,6 +1,6 @@
 use crate::api_connection;
 use crate::api_connection::ApiConnection;
-use crate::api_connection_graph::{self, GraphLogRecord};
+use crate::api_connection_graph::{self, GraphLogRecord, GraphUALConnection};
 use crate::config::{Config, ContentTypesSubConfig};
 use crate::data_structures;
 use crate::data_structures::{
@@ -28,6 +28,25 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
+/// Holds the Graph API connection and per-type run lists needed to collect graph logs.
+/// Stored in the `Collector` and consumed window-by-window during `monitor()` so that
+/// each completed time window is flushed to output before the next one starts.
+struct GraphCollectionConfig {
+    connection: GraphUALConnection,
+    ual_runs: Vec<(String, String)>,
+    sign_in_runs: Vec<(String, String)>,
+    entra_audit_runs: Vec<(String, String)>,
+    entra_categories: Vec<String>,
+    exchange_mailbox_runs: Vec<(String, String)>,
+    intune_runs: Vec<(String, String)>,
+    skip_known_logs: bool,
+    graph_ual_enabled: bool,
+    sign_in_enabled: bool,
+    entra_audit_enabled: bool,
+    exchange_mailbox_enabled: bool,
+    intune_enabled: bool,
+}
+
 /// # Office Audit Log Collector
 /// Will start three background threads responsible for retrieving content:
 /// - blob_thread: find content blobs and send results to content channel
@@ -46,7 +65,7 @@ pub struct Collector {
     saved: usize,
     cache: Caches,
     filters: HashMap<String, ArbitraryJson>,
-    graph_logs: Vec<GraphLogRecord>,
+    graph_config: Option<GraphCollectionConfig>,
 }
 
 impl Collector {
@@ -105,7 +124,6 @@ impl Collector {
         api.subscribe_to_feeds().await?;
 
         let known_blobs = config.load_known_blobs();
-        let mut graph_logs = Vec::new();
         let sign_in_enabled = args
             .entra_signin
             .unwrap_or(config.collect.content_types.entra_id_sign_ins_enabled());
@@ -118,7 +136,7 @@ impl Collector {
         let intune_enabled = args
             .intune
             .unwrap_or(config.collect.content_types.intune_enabled());
-        if config.collect.content_types.graph_ual_enabled()
+        let graph_config = if config.collect.content_types.graph_ual_enabled()
             || sign_in_enabled
             || entra_audit_enabled
             || exchange_mailbox_enabled
@@ -130,89 +148,57 @@ impl Collector {
             ).await?;
             let skip_known_logs = config.collect.skip_known_logs.unwrap_or(true);
 
-            if config.collect.content_types.graph_ual_enabled() {
-                info!("Retrieving Unified Audit Logs from Microsoft Graph API.");
-                let graph_runs = runs.get("UALGraph").cloned().unwrap_or_default();
-                let mut ual_graph_logs = graph_connection
-                    .collect_logs(&graph_runs, &known_blobs, skip_known_logs)
-                    .await?;
-                info!(
-                    "Retrieved {} Unified Audit Logs from Graph API.",
-                    ual_graph_logs.len()
-                );
-                graph_logs.append(&mut ual_graph_logs);
-            }
-
-            if sign_in_enabled {
-                info!("Retrieving Entra ID sign-ins from Microsoft Graph API.");
-                let sign_in_runs = runs
-                    .get("EntraID.SignIns")
+            let ual_runs = if config.collect.content_types.graph_ual_enabled() {
+                runs.get("UALGraph").cloned().unwrap_or_default()
+            } else {
+                vec![]
+            };
+            let sign_in_runs = if sign_in_enabled {
+                runs.get("EntraID.SignIns")
                     .cloned()
-                    .unwrap_or_else(|| config.get_time_ranges());
-                let mut sign_in_logs = graph_connection
-                    .collect_entra_signin_logs(&sign_in_runs, &known_blobs, skip_known_logs)
-                    .await?;
-                info!(
-                    "Retrieved {} Entra ID sign-ins from Graph API.",
-                    sign_in_logs.len()
-                );
-                graph_logs.append(&mut sign_in_logs);
-            }
-
-            if entra_audit_enabled {
-                info!("Retrieving Entra ID directory audit logs from Microsoft Graph API.");
-                let entra_runs = runs
-                    .get("EntraID.DirectoryAudits")
+                    .unwrap_or_else(|| config.get_time_ranges())
+            } else {
+                vec![]
+            };
+            let entra_audit_runs = if entra_audit_enabled {
+                runs.get("EntraID.DirectoryAudits")
                     .cloned()
-                    .unwrap_or_else(|| config.get_time_ranges());
-                let categories = config.collect.entra_categories.clone().unwrap_or_default();
-                let mut entra_logs = graph_connection
-                    .collect_entra_directory_audit_logs(
-                        &entra_runs,
-                        &categories,
-                        &known_blobs,
-                        skip_known_logs,
-                    )
-                    .await?;
-                info!(
-                    "Retrieved {} Entra ID directory audit logs from Graph API.",
-                    entra_logs.len()
-                );
-                graph_logs.append(&mut entra_logs);
-            }
-
-            if exchange_mailbox_enabled {
-                info!("Retrieving Exchange Mailbox Audit Logs from Microsoft Graph API.");
-                let exchange_runs = runs
-                    .get("ExchangeMailbox.Graph")
+                    .unwrap_or_else(|| config.get_time_ranges())
+            } else {
+                vec![]
+            };
+            let exchange_mailbox_runs = if exchange_mailbox_enabled {
+                runs.get("ExchangeMailbox.Graph")
                     .cloned()
-                    .unwrap_or_else(|| config.get_time_ranges());
-                let mut exchange_logs = graph_connection
-                    .collect_exchange_mailbox_logs(&exchange_runs, &known_blobs, skip_known_logs)
-                    .await?;
-                info!(
-                    "Retrieved {} Exchange Mailbox Audit Logs from Graph API.",
-                    exchange_logs.len()
-                );
-                graph_logs.append(&mut exchange_logs);
-            }
-
-            if intune_enabled {
-                info!("Retrieving Intune audit logs from Microsoft Graph API.");
-                let intune_runs = runs
-                    .get("Intune")
+                    .unwrap_or_else(|| config.get_time_ranges())
+            } else {
+                vec![]
+            };
+            let intune_runs = if intune_enabled {
+                runs.get("Intune")
                     .cloned()
-                    .unwrap_or_else(|| config.get_time_ranges());
-                let mut intune_logs = graph_connection
-                    .collect_intune_logs(&intune_runs, &known_blobs, skip_known_logs)
-                    .await?;
-                info!(
-                    "Retrieved {} Intune audit logs from Graph API.",
-                    intune_logs.len()
-                );
-                graph_logs.append(&mut intune_logs);
-            }
-        }
+                    .unwrap_or_else(|| config.get_time_ranges())
+            } else {
+                vec![]
+            };
+            Some(GraphCollectionConfig {
+                connection: graph_connection,
+                ual_runs,
+                sign_in_runs,
+                entra_audit_runs,
+                entra_categories: config.collect.entra_categories.clone().unwrap_or_default(),
+                exchange_mailbox_runs,
+                intune_runs,
+                skip_known_logs,
+                graph_ual_enabled: config.collect.content_types.graph_ual_enabled(),
+                sign_in_enabled,
+                entra_audit_enabled,
+                exchange_mailbox_enabled,
+                intune_enabled,
+            })
+        } else {
+            None
+        };
         let (result_rx, stats_rx, kill_tx) = get_available_content(
             api,
             config.collect.content_types,
@@ -240,7 +226,7 @@ impl Collector {
             kill_tx,
             filters,
             cache,
-            graph_logs,
+            graph_config,
         };
         Ok(collector)
     }
@@ -249,7 +235,11 @@ impl Collector {
     /// when all content has been retrieved (signalled by a final run stats message).
     pub async fn monitor(&mut self) {
         let start = Instant::now();
-        self.process_graph_logs().await;
+        if let Err(e) = self.collect_and_process_graph_logs().await {
+            error!("Graph log collection failed: {}", e);
+            self.end_run();
+            return;
+        }
         loop {
             if let Some(timeout) = self.config.collect.global_timeout {
                 if timeout > 0 && start.elapsed().as_secs().div(60) as usize >= timeout {
@@ -329,9 +319,116 @@ impl Collector {
         }
     }
 
-    async fn process_graph_logs(&mut self) {
-        let graph_logs = std::mem::take(&mut self.graph_logs);
-        for graph_log in graph_logs {
+    /// Collect graph logs one time window at a time, flushing each window's logs to output
+    /// before proceeding to the next window. This ensures that if collection fails partway
+    /// through, all previously completed windows have already been saved to the output
+    /// interfaces and their IDs recorded in known_blobs.
+    async fn collect_and_process_graph_logs(&mut self) -> Result<()> {
+        let config = match self.graph_config.take() {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        if config.graph_ual_enabled {
+            info!("Retrieving Unified Audit Logs from Microsoft Graph API.");
+            let mut total = 0;
+            for run in &config.ual_runs {
+                let logs = config
+                    .connection
+                    .collect_logs(std::slice::from_ref(run), &self.known_blobs, config.skip_known_logs)
+                    .await?;
+                total += logs.len();
+                self.process_and_flush_graph_window_logs(logs).await;
+            }
+            info!("Retrieved {} Unified Audit Logs from Graph API.", total);
+        }
+
+        if config.sign_in_enabled {
+            info!("Retrieving Entra ID sign-ins from Microsoft Graph API.");
+            let mut total = 0;
+            for run in &config.sign_in_runs {
+                let logs = config
+                    .connection
+                    .collect_entra_signin_logs(
+                        std::slice::from_ref(run),
+                        &self.known_blobs,
+                        config.skip_known_logs,
+                    )
+                    .await?;
+                total += logs.len();
+                self.process_and_flush_graph_window_logs(logs).await;
+            }
+            info!("Retrieved {} Entra ID sign-ins from Graph API.", total);
+        }
+
+        if config.entra_audit_enabled {
+            info!("Retrieving Entra ID directory audit logs from Microsoft Graph API.");
+            let mut total = 0;
+            for run in &config.entra_audit_runs {
+                let logs = config
+                    .connection
+                    .collect_entra_directory_audit_logs(
+                        std::slice::from_ref(run),
+                        &config.entra_categories,
+                        &self.known_blobs,
+                        config.skip_known_logs,
+                    )
+                    .await?;
+                total += logs.len();
+                self.process_and_flush_graph_window_logs(logs).await;
+            }
+            info!(
+                "Retrieved {} Entra ID directory audit logs from Graph API.",
+                total
+            );
+        }
+
+        if config.exchange_mailbox_enabled {
+            info!("Retrieving Exchange Mailbox Audit Logs from Microsoft Graph API.");
+            let mut total = 0;
+            for run in &config.exchange_mailbox_runs {
+                let logs = config
+                    .connection
+                    .collect_exchange_mailbox_logs(
+                        std::slice::from_ref(run),
+                        &self.known_blobs,
+                        config.skip_known_logs,
+                    )
+                    .await?;
+                total += logs.len();
+                self.process_and_flush_graph_window_logs(logs).await;
+            }
+            info!(
+                "Retrieved {} Exchange Mailbox Audit Logs from Graph API.",
+                total
+            );
+        }
+
+        if config.intune_enabled {
+            info!("Retrieving Intune audit logs from Microsoft Graph API.");
+            let mut total = 0;
+            for run in &config.intune_runs {
+                let logs = config
+                    .connection
+                    .collect_intune_logs(
+                        std::slice::from_ref(run),
+                        &self.known_blobs,
+                        config.skip_known_logs,
+                    )
+                    .await?;
+                total += logs.len();
+                self.process_and_flush_graph_window_logs(logs).await;
+            }
+            info!("Retrieved {} Intune audit logs from Graph API.", total);
+        }
+
+        Ok(())
+    }
+
+    /// Process a single time window's graph log records and immediately flush them to
+    /// the output interfaces, updating known_blobs along the way.
+    async fn process_and_flush_graph_window_logs(&mut self, logs: Vec<GraphLogRecord>) {
+        for graph_log in logs {
             self.known_blobs
                 .insert(graph_log.content_id.clone(), graph_log.expiration.clone());
             let graph_content = ContentToRetrieve {
@@ -342,6 +439,7 @@ impl Collector {
             };
             self.handle_log(graph_log.log, &graph_content).await;
         }
+        self.output().await;
     }
     pub async fn check_stats(&mut self) -> bool {
         if let Ok(Some((found, successful, retried, failed))) = self.stats_rx.try_next() {
