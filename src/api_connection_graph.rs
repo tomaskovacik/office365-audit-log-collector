@@ -33,7 +33,7 @@ pub const DEFAULT_QUERY_TIMEOUT_RETRIES: usize = 3;
 pub(crate) const UAL_RECORDS_PAGE_SIZE: usize = 50000;
 
 /// Maximum concurrent connections to the Graph beta endpoint (Microsoft limit).
-const MAX_CONCURRENT_CONNECTIONS: usize = 4;
+const MAX_CONCURRENT_CONNECTIONS: usize = 1;
 /// Maximum POST requests per rate-limit window (Microsoft limit: 25/10 s).
 const MAX_POST_PER_WINDOW: u32 = 25;
 /// Maximum GET requests per rate-limit window (Microsoft limit: 350/10 s).
