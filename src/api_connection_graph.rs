@@ -621,12 +621,30 @@ impl GraphUALConnection {
         let mut last_error = String::new();
         for attempt in 0..RATE_LIMIT_RETRY_ATTEMPTS {
             self.wait_for_post_rate_limit().await;
-            let response = self.client
+            let send_result = self.client
                 .post(url)
                 .headers(self.headers.clone())
                 .json(&body)
                 .send()
-                .await?;
+                .await;
+            let response = match send_result {
+                Ok(r) => r,
+                Err(e) if is_transport_error(&e) => {
+                    last_error = e.to_string();
+                    if attempt + 1 < RATE_LIMIT_RETRY_ATTEMPTS {
+                        warn!(
+                            "Graph API transport error, waiting {} seconds before retry ({}/{}): {}",
+                            SERVER_ERROR_RETRY_SLEEP_SECS,
+                            attempt + 1,
+                            RATE_LIMIT_RETRY_ATTEMPTS - 1,
+                            e
+                        );
+                        sleep(Duration::from_secs(SERVER_ERROR_RETRY_SLEEP_SECS)).await;
+                    }
+                    continue;
+                }
+                Err(e) => return Err(anyhow::Error::from(e)),
+            };
             let status = response.status();
             if !status.is_success() {
                 let retry_after = extract_retry_after_secs(&response);
@@ -654,7 +672,7 @@ impl GraphUALConnection {
             return Ok(query_id.to_string());
         }
         Err(anyhow!(
-            "Graph UAL query start failed after {} attempts due to rate limiting: {}",
+            "Graph UAL query start failed after {} attempts due to transient errors: {}",
             RATE_LIMIT_RETRY_ATTEMPTS,
             last_error
         ))
@@ -666,13 +684,33 @@ impl GraphUALConnection {
             query_id
         );
         debug!("Polling Graph UAL query {} for completion", query_id);
+        let mut transport_error_attempts = 0;
         for _ in 0..POLL_ATTEMPTS {
             self.wait_for_get_rate_limit().await;
-            let response = self.client
+            let response = match self.client
                 .get(url.clone())
                 .headers(self.headers.clone())
                 .send()
-                .await?;
+                .await
+            {
+                Ok(r) => r,
+                Err(e) if is_transport_error(&e) => {
+                    if transport_error_attempts < SERVER_ERROR_RETRY_ATTEMPTS {
+                        transport_error_attempts += 1;
+                        warn!(
+                            "Graph API transport error during query status check, waiting {} seconds ({}/{}): {}",
+                            SERVER_ERROR_RETRY_SLEEP_SECS,
+                            transport_error_attempts,
+                            SERVER_ERROR_RETRY_ATTEMPTS,
+                            e
+                        );
+                        sleep(Duration::from_secs(SERVER_ERROR_RETRY_SLEEP_SECS)).await;
+                        continue;
+                    }
+                    return Err(anyhow::Error::from(e));
+                }
+                Err(e) => return Err(anyhow::Error::from(e)),
+            };
             let status = response.status();
             if !status.is_success() {
                 let retry_after = extract_retry_after_secs(&response);
@@ -780,11 +818,30 @@ impl GraphUALConnection {
             self.wait_for_get_rate_limit().await;
             let mut server_error_attempts = 0;
             loop {
-                let response = client
+                let response = match client
                     .get(url)
                     .headers(self.headers.clone())
                     .send()
-                    .await?;
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) if is_transport_error(&e) => {
+                        if server_error_attempts < SERVER_ERROR_RETRY_ATTEMPTS {
+                            server_error_attempts += 1;
+                            warn!(
+                                "Graph API transport error, waiting {} seconds before retry ({}/{}): {}",
+                                SERVER_ERROR_RETRY_SLEEP_SECS,
+                                server_error_attempts,
+                                SERVER_ERROR_RETRY_ATTEMPTS,
+                                e
+                            );
+                            sleep(Duration::from_secs(SERVER_ERROR_RETRY_SLEEP_SECS)).await;
+                            continue;
+                        }
+                        return Err(anyhow::Error::from(e));
+                    }
+                    Err(e) => return Err(anyhow::Error::from(e)),
+                };
                 let status = response.status();
                 if !status.is_success() {
                     let retry_after = extract_retry_after_secs(&response);
@@ -852,6 +909,10 @@ fn is_rate_limited(status: u16, text: &str) -> bool {
 
 fn is_server_error(status: u16) -> bool {
     (500..600).contains(&status)
+}
+
+fn is_transport_error(err: &reqwest::Error) -> bool {
+    err.is_connect() || err.is_request() || err.is_timeout()
 }
 
 fn is_query_timeout_error(e: &anyhow::Error) -> bool {
