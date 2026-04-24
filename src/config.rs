@@ -328,10 +328,19 @@ pub struct FileOutputSubConfig {
     pub separator: Option<String>,
 }
 
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum GraylogFormat {
+    Raw,
+    Gelf,
+}
+
 #[derive(Deserialize, Clone, Debug)]
 pub struct GraylogOutputSubConfig {
     pub address: String,
     pub port: u16,
+    pub format: Option<GraylogFormat>,
+    pub host: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Debug)]

@@ -236,15 +236,54 @@ You can schedule to run the executable with CRON or Task Scheduler.
 I wrote a full tutorial on the Graylog blog. You can find it
 [here](https://community.graylog.org/t/collecting-office365-azuread-audit-logs-using-office-audit-collector/23925).
 
-#### Creating a Graylog input
+Two output formats are supported. Choose the one that fits your setup:
 
-The Graylog input which receives the audit data is a simple **Raw/Plaintext TCP** input. You can create it with default
-values; for reference, only the name and port need to be changed from defaults.
+---
 
-Navigate to **System > Inputs > Launch new input**, select **Raw/Plaintext TCP**, and configure the port to match
-the `port` value in your collector config (e.g. `5555`).
+#### Option A — GELF format (recommended, no extractor needed)
 
-#### Creating an extractor
+GELF (Graylog Extended Log Format) is a structured format that Graylog understands natively.
+When you use `format: gelf`, each audit log field is sent as a first-class Graylog message field
+automatically — **no extractor is required**.
+
+**Collector config:**
+```yaml
+output:
+  graylog:
+    address: localhost
+    port: 12201          # default GELF TCP port
+    format: gelf
+    host: office365-audit-collector   # optional; identifies the sender in Graylog
+```
+
+**Graylog input:**
+
+Navigate to **System > Inputs > Launch new input**, select **GELF TCP**, and set the port to match
+the `port` value above (e.g. `12201`). No extractor configuration is needed.
+
+---
+
+#### Option B — Raw JSON format (default, extractor required)
+
+The default (`format: raw`, or omitting the `format` field entirely) sends plain JSON over a
+`Raw/Plaintext TCP` input. A JSON extractor must be configured on the Graylog side to parse the
+fields out of the raw message.
+
+**Collector config:**
+```yaml
+output:
+  graylog:
+    address: localhost
+    port: 5555
+    # format: raw   # this is the default
+```
+
+**Graylog input:**
+
+Navigate to **System > Inputs > Launch new input**, select **Raw/Plaintext TCP**, and configure the
+port to match the `port` value in your collector config (e.g. `5555`).
+
+**Creating an extractor:**
 
 On your new input click **Manage extractors**. We need an extractor to parse the JSON that Microsoft sends.
 Click **Import extractor** and paste the following:
