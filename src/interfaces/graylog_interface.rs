@@ -1,19 +1,23 @@
 use std::io::{ErrorKind, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
 use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use log::{debug, warn};
 use serde_json::{Map, Value};
-use crate::config::{Config, GraylogFormat};
+use crate::config::{Config, GraylogFormat, GraylogProtocol};
 use crate::data_structures::{ArbitraryJson, Caches};
 use crate::interfaces::interface::Interface;
+
+/// Maximum payload size for a single GELF UDP datagram (per the GELF specification).
+const GELF_UDP_MAX_BYTES: usize = 8192;
 
 pub struct GraylogInterface {
     address: String,
     port: u16,
     format: GraylogFormat,
     host: String,
+    protocol: GraylogProtocol,
 }
 
 impl GraylogInterface {
@@ -25,21 +29,26 @@ impl GraylogInterface {
         let port = graylog_cfg.port;
         let format = graylog_cfg.format.clone().unwrap_or(GraylogFormat::Raw);
         let host = graylog_cfg.host.clone().unwrap_or_else(|| "office365-audit-collector".to_string());
+        let protocol = graylog_cfg.protocol.clone().unwrap_or(GraylogProtocol::Tcp);
         let interface = GraylogInterface {
             address,
             port,
             format,
             host,
+            protocol,
         };
 
-        // Test socket connection at startup
-        interface.get_socket()?;
+        // Test TCP connection at startup to catch misconfigured address/port early.
+        // UDP is connectionless so there is nothing to test at startup.
+        if interface.protocol == GraylogProtocol::Tcp {
+            interface.get_tcp_socket()?;
+        }
         Ok(interface)
     }
 }
 
 impl GraylogInterface {
-    fn get_socket(&self) -> Result<TcpStream, std::io::Error> {
+    fn get_tcp_socket(&self) -> Result<TcpStream, std::io::Error> {
 
         let ip_addr = (self.address.clone(), self.port)
             .to_socket_addrs()
@@ -87,30 +96,56 @@ impl Interface for GraylogInterface {
                     }
                 };
 
-                let mut bytes = serialized.into_bytes();
-                // GELF TCP framing requires each message to be terminated with a null byte.
-                // Raw mode must NOT include the null byte so that Graylog's Raw/Plaintext TCP
-                // input can parse the JSON without a trailing null corrupting it.
-                if self.format == GraylogFormat::Gelf {
-                    bytes.push(0u8);
-                }
+                let bytes = serialized.into_bytes();
 
                 // Print the serialized message to stdout so it can be inspected when debugging
-                // connectivity issues (the null byte is excluded from the printout for readability).
-                let printable = std::str::from_utf8(
-                    if self.format == GraylogFormat::Gelf { &bytes[..bytes.len() - 1] } else { &bytes }
-                ).unwrap_or("<non-utf8>");
-                println!("[graylog-debug] sending to {}:{}: {}", self.address, self.port, printable);
-                debug!("[graylog-debug] sending to {}:{}: {}", self.address, self.port, printable);
+                // connectivity issues.
+                let printable = std::str::from_utf8(&bytes).unwrap_or("<non-utf8>");
+                println!("[graylog-debug] sending to {}:{} ({}): {}", self.address, self.port,
+                    if self.protocol == GraylogProtocol::Udp { "udp" } else { "tcp" }, printable);
+                debug!("[graylog-debug] sending to {}:{} ({}): {}", self.address, self.port,
+                    if self.protocol == GraylogProtocol::Udp { "udp" } else { "tcp" }, printable);
 
-                match self.get_socket() {
-                    Ok(mut socket) => {
-                        socket.write_all(&bytes).unwrap_or_else(
-                            |e| warn!("Could not send log to Graylog interface: {}", e));
-                        socket.flush().unwrap_or_else(
-                            |e| warn!("Could not send log to Graylog interface: {}", e));
+                match self.protocol {
+                    GraylogProtocol::Udp => {
+                        // GELF over UDP: the payload is the raw GELF message with no framing.
+                        // The GELF specification limits a single UDP datagram to 8192 bytes.
+                        // Larger payloads would require GELF chunking which is not implemented;
+                        // warn and skip rather than send a truncated or malformed message.
+                        if bytes.len() > GELF_UDP_MAX_BYTES {
+                            warn!(
+                                "GELF message is {} bytes which exceeds the UDP maximum of {} bytes, skipping.",
+                                bytes.len(), GELF_UDP_MAX_BYTES
+                            );
+                            continue;
+                        }
+                        match UdpSocket::bind("0.0.0.0:0") {
+                            Ok(socket) => {
+                                let addr = format!("{}:{}", self.address, self.port);
+                                socket.send_to(&bytes, &addr).unwrap_or_else(
+                                    |e| { warn!("Could not send log to Graylog via UDP: {}", e); 0 });
+                            }
+                            Err(e) => warn!("Could not bind UDP socket for Graylog: {}", e),
+                        }
                     }
-                    Err(e) => warn!("Could not connect to Graylog interface on: {}:{} with: {}", self.address, self.port, e),
+                    GraylogProtocol::Tcp => {
+                        // GELF TCP framing: each message is terminated with a null byte.
+                        // Raw mode must NOT include the null byte so that Graylog's Raw/Plaintext
+                        // TCP input can parse the JSON without a trailing null corrupting it.
+                        let mut framed = bytes;
+                        if self.format == GraylogFormat::Gelf {
+                            framed.push(0u8);
+                        }
+                        match self.get_tcp_socket() {
+                            Ok(mut socket) => {
+                                socket.write_all(&framed).unwrap_or_else(
+                                    |e| warn!("Could not send log to Graylog interface: {}", e));
+                                socket.flush().unwrap_or_else(
+                                    |e| warn!("Could not send log to Graylog interface: {}", e));
+                            }
+                            Err(e) => warn!("Could not connect to Graylog interface on: {}:{} with: {}", self.address, self.port, e),
+                        }
+                    }
                 }
             }
         }

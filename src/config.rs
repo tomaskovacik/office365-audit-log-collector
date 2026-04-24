@@ -335,12 +335,20 @@ pub enum GraylogFormat {
     Gelf,
 }
 
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum GraylogProtocol {
+    Tcp,
+    Udp,
+}
+
 #[derive(Deserialize, Clone, Debug)]
 pub struct GraylogOutputSubConfig {
     pub address: String,
     pub port: u16,
     pub format: Option<GraylogFormat>,
     pub host: Option<String>,
+    pub protocol: Option<GraylogProtocol>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
