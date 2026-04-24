@@ -88,9 +88,12 @@ impl Interface for GraylogInterface {
                 };
 
                 let mut bytes = serialized.into_bytes();
-                // GELF TCP framing requires a null byte terminator; also append it for raw mode
-                // so the framing is consistent (Graylog raw input ignores trailing null bytes).
-                bytes.push(0u8);
+                // GELF TCP framing requires each message to be terminated with a null byte.
+                // Raw mode must NOT include the null byte so that Graylog's Raw/Plaintext TCP
+                // input can parse the JSON without a trailing null corrupting it.
+                if self.format == GraylogFormat::Gelf {
+                    bytes.push(0u8);
+                }
 
                 match self.get_socket() {
                     Ok(mut socket) => {
@@ -176,15 +179,19 @@ pub fn build_gelf_message(log: &ArbitraryJson, host: &str) -> Result<String, std
 
     for (key, value) in log {
         // The GELF spec reserves `_id`; skip it to avoid conflicts with Graylog's internal id.
-        // All other audit log fields are included as GELF additional fields (prefixed with `_`).
-        // This means fields like `Operation` and `CreationTime` appear as both the GELF required
-        // fields (`short_message`/`timestamp`) and as searchable additional fields (`_Operation`/
-        // `_CreationTime`), which is intentional and standard GELF practice.
         if key == "id" {
             continue;
         }
+        // GELF additional fields must be strings or numbers.  Arrays, objects, booleans, and
+        // nulls are not permitted; coerce them to their JSON string representation so that
+        // Graylog does not silently drop the entire message.  Office 365 audit logs commonly
+        // contain array-valued fields such as `Parameters`, `ExtendedProperties`, and `Actor`.
+        let gelf_value = match value {
+            Value::String(_) | Value::Number(_) => value.clone(),
+            other => Value::String(other.to_string()),
+        };
         let gelf_key = format!("_{}", key);
-        gelf.insert(gelf_key, value.clone());
+        gelf.insert(gelf_key, gelf_value);
     }
 
     serde_json::to_string(&gelf)
@@ -242,6 +249,46 @@ mod tests {
         log.insert("Operation".to_string(), Value::String("Test".to_string()));
         assert!(build_gelf_message(&log, "myhost").is_err());
     }
+
+    #[test]
+    fn gelf_message_coerces_array_value_to_string() {
+        let mut log = make_log("FileAccessed", "2024-04-24T10:00:00");
+        log.insert("Parameters".to_string(), serde_json::json!([{"Name": "foo", "Value": "bar"}]));
+        let json_str = build_gelf_message(&log, "myhost").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        // Must be a string, not an array
+        assert!(parsed["_Parameters"].is_string(), "_Parameters must be coerced to a string");
+    }
+
+    #[test]
+    fn gelf_message_coerces_object_value_to_string() {
+        let mut log = make_log("FileAccessed", "2024-04-24T10:00:00");
+        log.insert("Nested".to_string(), serde_json::json!({"key": "value"}));
+        let json_str = build_gelf_message(&log, "myhost").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(parsed["_Nested"].is_string(), "_Nested must be coerced to a string");
+    }
+
+    #[test]
+    fn gelf_message_coerces_bool_value_to_string() {
+        let mut log = make_log("FileAccessed", "2024-04-24T10:00:00");
+        log.insert("IsAnonymous".to_string(), Value::Bool(true));
+        let json_str = build_gelf_message(&log, "myhost").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(parsed["_IsAnonymous"].is_string(), "_IsAnonymous must be coerced to a string");
+        assert_eq!(parsed["_IsAnonymous"], "true");
+    }
+
+    #[test]
+    fn gelf_message_preserves_string_and_number_values() {
+        let mut log = make_log("FileAccessed", "2024-04-24T10:00:00");
+        log.insert("RecordType".to_string(), Value::Number(serde_json::Number::from(14)));
+        let json_str = build_gelf_message(&log, "myhost").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(parsed["_RecordType"].is_number(), "_RecordType must remain a number");
+        assert_eq!(parsed["_UserId"], "user@example.com");
+    }
+
 
     #[test]
     fn gelf_message_excludes_id_field() {
