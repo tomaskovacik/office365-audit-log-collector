@@ -171,7 +171,10 @@ pub fn build_gelf_message(log: &ArbitraryJson, host: &str) -> Result<String, std
         .map_err(|_| std::io::Error::new(ErrorKind::InvalidData, "Could not parse CreationTime"))?;
     let timestamp_secs = DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc).timestamp() as f64;
 
+    // Graph API UAL records use camelCase "operation"; Management API records use "Operation".
+    // Check both so that all log sources get a meaningful short_message.
     let short_message = log.get("Operation")
+        .or_else(|| log.get("operation"))
         .and_then(|v| v.as_str())
         .unwrap_or("Office365AuditLog")
         .to_string();
@@ -191,10 +194,14 @@ pub fn build_gelf_message(log: &ArbitraryJson, host: &str) -> Result<String, std
             continue;
         }
         // GELF additional fields must be strings or numbers.  Arrays, objects, booleans, and
-        // nulls are not permitted; coerce them to their JSON string representation so that
-        // Graylog does not silently drop the entire message.  Office 365 audit logs commonly
-        // contain array-valued fields such as `Parameters`, `ExtendedProperties`, and `Actor`.
+        // nulls are not permitted.  Null fields are omitted entirely to avoid inserting a
+        // meaningless string "null" into Graylog (e.g. Graph API records often send clientIp as
+        // null when no IP is present).  Other non-scalar values are coerced to their JSON string
+        // representation so that Graylog does not silently drop the entire message.  Office 365
+        // audit logs commonly contain array-valued fields such as `Parameters`,
+        // `ExtendedProperties`, and `Actor`.
         let gelf_value = match value {
+            Value::Null => continue,
             Value::String(_) | Value::Number(_) => value.clone(),
             other => Value::String(other.to_string()),
         };
@@ -305,6 +312,39 @@ mod tests {
         let json_str = build_gelf_message(&log, "myhost").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         assert!(parsed.get("_id").is_none(), "_id must not appear in GELF message");
+    }
+
+    #[test]
+    fn gelf_message_omits_null_field() {
+        let mut log = make_log("FileAccessed", "2024-04-24T10:00:00");
+        log.insert("clientIp".to_string(), Value::Null);
+        let json_str = build_gelf_message(&log, "myhost").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(parsed.get("_clientIp").is_none(), "_clientIp must be omitted when null, not serialized as \"null\"");
+    }
+
+    #[test]
+    fn gelf_message_uses_lowercase_operation_for_short_message() {
+        let mut log = ArbitraryJson::new();
+        log.insert("CreationTime".to_string(), Value::String("2024-04-24T10:00:00".to_string()));
+        // Graph API UAL records use camelCase "operation" instead of "Operation"
+        log.insert("operation".to_string(), Value::String("PreAuthTokenUsedExtended".to_string()));
+        let json_str = build_gelf_message(&log, "myhost").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["short_message"], "PreAuthTokenUsedExtended",
+            "short_message must use camelCase 'operation' field when PascalCase 'Operation' is absent");
+    }
+
+    #[test]
+    fn gelf_message_prefers_pascalcase_operation_over_lowercase() {
+        let mut log = ArbitraryJson::new();
+        log.insert("CreationTime".to_string(), Value::String("2024-04-24T10:00:00".to_string()));
+        log.insert("Operation".to_string(), Value::String("FileAccessed".to_string()));
+        log.insert("operation".to_string(), Value::String("OtherOperation".to_string()));
+        let json_str = build_gelf_message(&log, "myhost").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["short_message"], "FileAccessed",
+            "PascalCase 'Operation' must take precedence over camelCase 'operation'");
     }
 
     #[test]
