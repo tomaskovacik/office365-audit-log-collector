@@ -109,6 +109,7 @@ const ENTRA_SIGNIN_CONTENT_TYPE: &str = "EntraID.SignIns";
 const ENTRA_AUDIT_CONTENT_TYPE: &str = "EntraID.DirectoryAudits";
 const EXCHANGE_MAILBOX_GRAPH_CONTENT_TYPE: &str = "ExchangeMailbox.Graph";
 const INTUNE_CONTENT_TYPE: &str = "Intune";
+const IDENTITY_PROTECTION_RISK_DETECTIONS_CONTENT_TYPE: &str = "IdentityProtection.RiskDetections";
 
 /// Record type filters used when querying the UAL endpoint for Exchange Mailbox events.
 /// Uses the valid `auditLogRecordType` enum values from the Microsoft Graph Security API:
@@ -597,6 +598,74 @@ impl GraphUALConnection {
             }
             info!(
                 "Successfully collected {} Intune audit records for time range {} - {}",
+                collected.len() - run_start_len,
+                start_time,
+                end_time
+            );
+        }
+        Ok(collected)
+    }
+
+    /// Collect Identity Protection Risk Detections via the Microsoft Graph identityProtection endpoint.
+    ///
+    /// Required Graph permission: `IdentityRiskEvent.Read.All`
+    pub async fn collect_identity_protection_risk_detections(
+        &self,
+        runs: &[(String, String)],
+        known_blobs: &HashMap<String, String>,
+        skip_known_logs: bool,
+    ) -> Result<Vec<GraphLogRecord>> {
+        let mut collected = Vec::new();
+
+        for (start_time, end_time) in runs {
+            info!(
+                "Collecting Identity Protection Risk Detections for time range {} - {}",
+                start_time, end_time
+            );
+            let run_start_len = collected.len();
+            let mut next_page = Some(build_risk_detections_url(start_time, end_time)?);
+            while let Some(url) = next_page {
+                debug!("Fetching Identity Protection Risk Detections page");
+                let json = self
+                    .get_json_with_retry(
+                        &self.fetch_client,
+                        &url,
+                        "Graph Identity Protection Risk Detections request failed",
+                    )
+                    .await?;
+                let records = json
+                    .get("value")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                debug!(
+                    "Retrieved {} Identity Protection Risk Detection records on this page",
+                    records.len()
+                );
+                for record in records {
+                    let map = record.as_object().cloned();
+                    if map.is_none() {
+                        warn!("Identity Protection Risk Detection record was not an object, skipping.");
+                        continue;
+                    }
+                    let mut log: ArbitraryJson = map.unwrap().into_iter().collect();
+                    normalize_creation_time(&mut log);
+                    if let Some(new_record) = create_graph_log_record(
+                        IDENTITY_PROTECTION_RISK_DETECTIONS_CONTENT_TYPE,
+                        log,
+                        known_blobs,
+                        skip_known_logs,
+                    ) {
+                        collected.push(new_record);
+                    }
+                }
+                next_page = json
+                    .get("@odata.nextLink")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string());
+            }
+            info!(
+                "Successfully collected {} Identity Protection Risk Detection records for time range {} - {}",
                 collected.len() - run_start_len,
                 start_time,
                 end_time
@@ -1096,11 +1165,27 @@ fn build_intune_filter(start_time: &str, end_time: &str) -> String {
     )
 }
 
+fn build_risk_detections_url(start_time: &str, end_time: &str) -> Result<String> {
+    let mut url =
+        Url::parse("https://graph.microsoft.com/v1.0/identityProtection/riskDetections")?;
+    let filter = build_risk_detections_filter(start_time, end_time);
+    url.query_pairs_mut().append_pair("$filter", &filter);
+    Ok(url.to_string())
+}
+
+fn build_risk_detections_filter(start_time: &str, end_time: &str) -> String {
+    format!(
+        "activityDateTime ge {} and activityDateTime le {}",
+        start_time, end_time
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::api_connection_graph::{
-        build_directory_audit_filter, build_intune_filter, build_signin_filter, GraphRateLimiter,
-        MAX_GET_PER_WINDOW, MAX_POST_PER_WINDOW, UAL_RECORDS_PAGE_SIZE,
+        build_directory_audit_filter, build_intune_filter, build_risk_detections_filter,
+        build_signin_filter, GraphRateLimiter, MAX_GET_PER_WINDOW, MAX_POST_PER_WINDOW,
+        UAL_RECORDS_PAGE_SIZE,
     };
     use std::time::Duration;
 
@@ -1163,6 +1248,15 @@ mod tests {
     #[test]
     fn builds_intune_filter() {
         let filter = build_intune_filter("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z");
+        assert_eq!(
+            filter,
+            "activityDateTime ge 2026-01-01T00:00:00Z and activityDateTime le 2026-01-01T01:00:00Z"
+        );
+    }
+
+    #[test]
+    fn builds_risk_detections_filter() {
+        let filter = build_risk_detections_filter("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z");
         assert_eq!(
             filter,
             "activityDateTime ge 2026-01-01T00:00:00Z and activityDateTime le 2026-01-01T01:00:00Z"

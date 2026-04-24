@@ -39,12 +39,14 @@ struct GraphCollectionConfig {
     entra_categories: Vec<String>,
     exchange_mailbox_runs: Vec<(String, String)>,
     intune_runs: Vec<(String, String)>,
+    identity_protection_risk_detections_runs: Vec<(String, String)>,
     skip_known_logs: bool,
     graph_ual_enabled: bool,
     sign_in_enabled: bool,
     entra_audit_enabled: bool,
     exchange_mailbox_enabled: bool,
     intune_enabled: bool,
+    identity_protection_risk_detections_enabled: bool,
 }
 
 /// # Office Audit Log Collector
@@ -136,11 +138,15 @@ impl Collector {
         let intune_enabled = args
             .intune
             .unwrap_or(config.collect.content_types.intune_enabled());
+        let identity_protection_risk_detections_enabled = args
+            .identity_protection_risk_detections
+            .unwrap_or(config.collect.content_types.identity_protection_risk_detections_enabled());
         let graph_config = if config.collect.content_types.graph_ual_enabled()
             || sign_in_enabled
             || entra_audit_enabled
             || exchange_mailbox_enabled
             || intune_enabled
+            || identity_protection_risk_detections_enabled
         {
             let graph_connection = api_connection_graph::get_graph_connection(
                 args.clone(),
@@ -181,6 +187,14 @@ impl Collector {
             } else {
                 vec![]
             };
+            let identity_protection_risk_detections_runs =
+                if identity_protection_risk_detections_enabled {
+                    runs.get("IdentityProtection.RiskDetections")
+                        .cloned()
+                        .unwrap_or_else(|| config.get_time_ranges())
+                } else {
+                    vec![]
+                };
             Some(GraphCollectionConfig {
                 connection: graph_connection,
                 ual_runs,
@@ -189,12 +203,14 @@ impl Collector {
                 entra_categories: config.collect.entra_categories.clone().unwrap_or_default(),
                 exchange_mailbox_runs,
                 intune_runs,
+                identity_protection_risk_detections_runs,
                 skip_known_logs,
                 graph_ual_enabled: config.collect.content_types.graph_ual_enabled(),
                 sign_in_enabled,
                 entra_audit_enabled,
                 exchange_mailbox_enabled,
                 intune_enabled,
+                identity_protection_risk_detections_enabled,
             })
         } else {
             None
@@ -420,6 +436,27 @@ impl Collector {
                 self.process_and_flush_graph_window_logs(logs).await;
             }
             info!("Retrieved {} Intune audit logs from Graph API.", total);
+        }
+
+        if config.identity_protection_risk_detections_enabled {
+            info!("Retrieving Identity Protection Risk Detections from Microsoft Graph API.");
+            let mut total = 0;
+            for run in &config.identity_protection_risk_detections_runs {
+                let logs = config
+                    .connection
+                    .collect_identity_protection_risk_detections(
+                        std::slice::from_ref(run),
+                        &self.known_blobs,
+                        config.skip_known_logs,
+                    )
+                    .await?;
+                total += logs.len();
+                self.process_and_flush_graph_window_logs(logs).await;
+            }
+            info!(
+                "Retrieved {} Identity Protection Risk Detection records from Graph API.",
+                total
+            );
         }
 
         Ok(())
