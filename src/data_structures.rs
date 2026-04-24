@@ -23,6 +23,7 @@ pub struct Caches {
     pub entra_id_directory_audits: JsonList,
     pub exchange_mailbox_graph: JsonList,
     pub intune: JsonList,
+    pub identity_protection_risk_detections: JsonList,
     pub size: usize,
 }
 impl Caches {
@@ -36,7 +37,8 @@ impl Caches {
             + self.entra_id_sign_ins.len()
             + self.entra_id_directory_audits.len()
             + self.exchange_mailbox_graph.len()
-            + self.intune.len();
+            + self.intune.len()
+            + self.identity_protection_risk_detections.len();
         size >= self.size
     }
 
@@ -57,11 +59,12 @@ impl Caches {
             "EntraID.DirectoryAudits" => self.entra_id_directory_audits.push(log),
             "ExchangeMailbox.Graph" => self.exchange_mailbox_graph.push(log),
             "Intune" => self.intune.push(log),
+            "IdentityProtection.RiskDetections" => self.identity_protection_risk_detections.push(log),
             _ => warn!("Unknown content type cached: {}", content_type),
         }
     }
 
-    pub fn get_all_types(&self) -> [(String, &JsonList); 10] {
+    pub fn get_all_types(&self) -> [(String, &JsonList); 11] {
         [
             ("Audit.General".to_string(), &self.general),
             ("Audit.AzureActiveDirectory".to_string(), &self.aad),
@@ -79,10 +82,14 @@ impl Caches {
                 &self.exchange_mailbox_graph,
             ),
             ("Intune".to_string(), &self.intune),
+            (
+                "IdentityProtection.RiskDetections".to_string(),
+                &self.identity_protection_risk_detections,
+            ),
         ]
     }
 
-    pub fn get_all(&mut self) -> [&mut JsonList; 10] {
+    pub fn get_all(&mut self) -> [&mut JsonList; 11] {
         [
             &mut self.general,
             &mut self.aad,
@@ -94,6 +101,7 @@ impl Caches {
             &mut self.entra_id_directory_audits,
             &mut self.exchange_mailbox_graph,
             &mut self.intune,
+            &mut self.identity_protection_risk_detections,
         ]
     }
 }
@@ -252,6 +260,13 @@ pub struct CliArgs {
         help = "Enable or disable Intune audit log export via Graph API (true/false). Overrides config."
     )]
     pub intune: Option<bool>,
+
+    #[arg(
+        long,
+        required = false,
+        help = "Enable or disable Identity Protection Risk Detections export via Graph API (true/false). Overrides config."
+    )]
+    pub identity_protection_risk_detections: Option<bool>,
 }
 
 #[cfg(test)]
@@ -266,7 +281,7 @@ mod tests {
         log.insert("id".to_string(), Value::String("abc".to_string()));
         cache.insert(log, &"UALGraph".to_string());
         assert_eq!(cache.ual_graph.len(), 1);
-        assert_eq!(cache.get_all_types().len(), 10);
+        assert_eq!(cache.get_all_types().len(), 11);
     }
 
     #[test]
@@ -285,7 +300,7 @@ mod tests {
         log.insert("id".to_string(), Value::String("mbx-1".to_string()));
         cache.insert(log, &"ExchangeMailbox.Graph".to_string());
         assert_eq!(cache.exchange_mailbox_graph.len(), 1);
-        assert_eq!(cache.get_all_types().len(), 10);
+        assert_eq!(cache.get_all_types().len(), 11);
     }
 
     #[test]
@@ -295,6 +310,16 @@ mod tests {
         log.insert("id".to_string(), Value::String("intune-1".to_string()));
         cache.insert(log, &"Intune".to_string());
         assert_eq!(cache.intune.len(), 1);
-        assert_eq!(cache.get_all_types().len(), 10);
+        assert_eq!(cache.get_all_types().len(), 11);
+    }
+
+    #[test]
+    fn caches_identity_protection_risk_detections_logs() {
+        let mut cache = Caches::new(100);
+        let mut log = ArbitraryJson::new();
+        log.insert("id".to_string(), Value::String("risk-1".to_string()));
+        cache.insert(log, &"IdentityProtection.RiskDetections".to_string());
+        assert_eq!(cache.identity_protection_risk_detections.len(), 1);
+        assert_eq!(cache.get_all_types().len(), 11);
     }
 }
