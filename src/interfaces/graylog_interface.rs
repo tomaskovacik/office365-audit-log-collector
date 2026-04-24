@@ -3,7 +3,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDateTime, Utc};
-use log::warn;
+use log::{debug, warn};
 use serde_json::{Map, Value};
 use crate::config::{Config, GraylogFormat};
 use crate::data_structures::{ArbitraryJson, Caches};
@@ -94,6 +94,14 @@ impl Interface for GraylogInterface {
                 if self.format == GraylogFormat::Gelf {
                     bytes.push(0u8);
                 }
+
+                // Print the serialized message to stdout so it can be inspected when debugging
+                // connectivity issues (the null byte is excluded from the printout for readability).
+                let printable = std::str::from_utf8(
+                    if self.format == GraylogFormat::Gelf { &bytes[..bytes.len() - 1] } else { &bytes }
+                ).unwrap_or("<non-utf8>");
+                println!("[graylog-debug] sending to {}:{}: {}", self.address, self.port, printable);
+                debug!("[graylog-debug] sending to {}:{}: {}", self.address, self.port, printable);
 
                 match self.get_socket() {
                     Ok(mut socket) => {
