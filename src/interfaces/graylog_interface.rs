@@ -29,7 +29,7 @@ impl GraylogInterface {
         let port = graylog_cfg.port;
         let format = graylog_cfg.format.clone().unwrap_or(GraylogFormat::Raw);
         let host = graylog_cfg.host.clone().unwrap_or_else(|| "office365-audit-collector".to_string());
-        let protocol = graylog_cfg.protocol.clone().unwrap_or(GraylogProtocol::Tcp);
+        let protocol = graylog_cfg.protocol.clone().unwrap_or(GraylogProtocol::Udp);
         let interface = GraylogInterface {
             address,
             port,
