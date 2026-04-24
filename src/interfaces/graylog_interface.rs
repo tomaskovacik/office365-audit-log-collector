@@ -193,6 +193,28 @@ pub fn build_gelf_message(log: &ArbitraryJson, host: &str) -> Result<String, std
         if key == "id" {
             continue;
         }
+        // UALGraph records carry a nested `auditData` JSON object that contains the most
+        // useful audit fields (ClientIP, Operation, UserId, ObjectId, …).  Serialising the
+        // whole object as a single escaped JSON string makes those fields un-searchable in
+        // Graylog.  Flatten one level of the object into individual `_auditData_<field>`
+        // GELF fields instead.
+        if key == "auditData" {
+            if let Value::Object(map) = value {
+                for (nested_key, nested_value) in map {
+                    // Skip odata type annotations – they are meta-data noise.
+                    if nested_key.starts_with('@') {
+                        continue;
+                    }
+                    let gelf_nested_value = match nested_value {
+                        Value::Null => continue,
+                        Value::String(_) | Value::Number(_) => nested_value.clone(),
+                        other => Value::String(other.to_string()),
+                    };
+                    gelf.insert(format!("_auditData_{}", nested_key), gelf_nested_value);
+                }
+            }
+            continue;
+        }
         // GELF additional fields must be strings or numbers.  Arrays, objects, booleans, and
         // nulls are not permitted.  Null fields are omitted entirely to avoid inserting a
         // meaningless string "null" into Graylog (e.g. Graph API records often send clientIp as
@@ -345,6 +367,33 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         assert_eq!(parsed["short_message"], "FileAccessed",
             "PascalCase 'Operation' must take precedence over camelCase 'operation'");
+    }
+
+    #[test]
+    fn gelf_message_flattens_audit_data_object() {
+        let mut log = make_log("FileAccessedExtended", "2024-04-24T10:00:00");
+        log.insert("auditData".to_string(), serde_json::json!({
+            "@odata.type": "#microsoft.graph.security.defaultAuditData",
+            "ClientIP": "4.210.128.168",
+            "Operation": "FileAccessedExtended",
+            "RecordType": 6,
+            "AppAccessContext": {"AADSessionId": "abc", "ClientAppName": "App Service"},
+            "NullField": null
+        }));
+        let json_str = build_gelf_message(&log, "myhost").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        // The raw _auditData blob must NOT appear
+        assert!(parsed.get("_auditData").is_none(), "_auditData must be flattened, not serialized as a string");
+        // Scalar fields are promoted to top-level GELF fields
+        assert_eq!(parsed["_auditData_ClientIP"], "4.210.128.168", "_auditData_ClientIP must be a string");
+        assert_eq!(parsed["_auditData_Operation"], "FileAccessedExtended", "_auditData_Operation must be a string");
+        assert!(parsed["_auditData_RecordType"].is_number(), "_auditData_RecordType must be a number");
+        // Nested objects are coerced to a string
+        assert!(parsed["_auditData_AppAccessContext"].is_string(), "_auditData_AppAccessContext must be coerced to a string");
+        // odata type annotations are dropped
+        assert!(parsed.get("_auditData_@odata.type").is_none(), "odata type annotations must be omitted");
+        // Null sub-fields are omitted
+        assert!(parsed.get("_auditData_NullField").is_none(), "null auditData fields must be omitted");
     }
 
     #[test]
