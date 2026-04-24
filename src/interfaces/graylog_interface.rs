@@ -64,7 +64,7 @@ impl Interface for GraylogInterface {
                         match add_timestamp_field(log) {
                             Ok(()) => (),
                             Err(e) => {
-                                warn!("Could parse timestamp for log in Graylog interface: {}", e);
+                                warn!("Could not parse timestamp for log in Graylog interface: {}", e);
                                 continue
                             }
                         }
@@ -175,6 +175,14 @@ pub fn build_gelf_message(log: &ArbitraryJson, host: &str) -> Result<String, std
     ));
 
     for (key, value) in log {
+        // The GELF spec reserves `_id`; skip it to avoid conflicts with Graylog's internal id.
+        // All other audit log fields are included as GELF additional fields (prefixed with `_`).
+        // This means fields like `Operation` and `CreationTime` appear as both the GELF required
+        // fields (`short_message`/`timestamp`) and as searchable additional fields (`_Operation`/
+        // `_CreationTime`), which is intentional and standard GELF practice.
+        if key == "id" {
+            continue;
+        }
         let gelf_key = format!("_{}", key);
         gelf.insert(gelf_key, value.clone());
     }
@@ -220,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn gelf_message_falls_back_short_message_when_no_operation() {
+    fn gelf_message_falls_back_to_short_message_when_no_operation() {
         let mut log = ArbitraryJson::new();
         log.insert("CreationTime".to_string(), Value::String("2024-04-24T10:00:00".to_string()));
         let json_str = build_gelf_message(&log, "myhost").unwrap();
@@ -233,6 +241,15 @@ mod tests {
         let mut log = ArbitraryJson::new();
         log.insert("Operation".to_string(), Value::String("Test".to_string()));
         assert!(build_gelf_message(&log, "myhost").is_err());
+    }
+
+    #[test]
+    fn gelf_message_excludes_id_field() {
+        let mut log = make_log("FileAccessed", "2024-04-24T10:00:00");
+        log.insert("id".to_string(), Value::String("some-id".to_string()));
+        let json_str = build_gelf_message(&log, "myhost").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(parsed.get("_id").is_none(), "_id must not appear in GELF message");
     }
 
     #[test]
