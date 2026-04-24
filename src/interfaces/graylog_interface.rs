@@ -185,6 +185,51 @@ pub fn add_timestamp_field(log: &mut ArbitraryJson) -> Result<(), std::io::Error
     Ok(())
 }
 
+/// Recursively flatten a JSON object into GELF additional fields.
+///
+/// Each key in `map` is appended to `prefix` (separated by `_`) to form the GELF field name.
+/// - `null` values are omitted entirely.
+/// - Nested `Object` values are recursed into, extending the prefix.
+/// - String values that happen to be valid JSON objects are parsed and recursed into so that
+///   fields serialised as escaped JSON strings (e.g. `AppAccessContext`) are also fully
+///   expanded.  Strings that are not JSON objects are kept as-is.
+/// - `@`-prefixed keys (OData annotations) are skipped at every level of nesting.
+/// - `Array` and `Bool` values are coerced to their JSON string representation so that
+///   Graylog does not silently drop the entire message.
+fn flatten_object_into_gelf(map: &Map<String, Value>, prefix: &str, gelf: &mut Map<String, Value>) {
+    for (key, value) in map {
+        // Skip OData type annotations – they are meta-data noise.
+        if key.starts_with('@') {
+            continue;
+        }
+        let field_name = format!("{}_{}", prefix, key);
+        match value {
+            Value::Null => {}
+            Value::Object(nested_map) => {
+                flatten_object_into_gelf(nested_map, &field_name, gelf);
+            }
+            Value::String(s) => {
+                // If the string is itself a JSON object, parse and recurse so that fields
+                // like `AppAccessContext` (often serialised as an escaped JSON string by
+                // the Graph API) become individual searchable GELF fields.
+                if s.trim_start().starts_with('{') {
+                    if let Ok(Value::Object(parsed_map)) = serde_json::from_str::<Value>(s) {
+                        flatten_object_into_gelf(&parsed_map, &field_name, gelf);
+                        continue;
+                    }
+                }
+                gelf.insert(field_name, value.clone());
+            }
+            Value::Number(_) => {
+                gelf.insert(field_name, value.clone());
+            }
+            other => {
+                gelf.insert(field_name, Value::String(other.to_string()));
+            }
+        }
+    }
+}
+
 /// Build a GELF 1.1 message from an audit log entry.
 ///
 /// Required GELF fields:
@@ -231,22 +276,12 @@ pub fn build_gelf_message(log: &ArbitraryJson, host: &str) -> Result<String, std
         // UALGraph records carry a nested `auditData` JSON object that contains the most
         // useful audit fields (ClientIP, Operation, UserId, ObjectId, …).  Serialising the
         // whole object as a single escaped JSON string makes those fields un-searchable in
-        // Graylog.  Flatten one level of the object into individual `_auditData_<field>`
-        // GELF fields instead.
+        // Graylog.  Recursively flatten the object into individual `_auditData_<field>`
+        // GELF fields so that even deeply-nested sub-objects (e.g. AppAccessContext) become
+        // individual searchable fields.
         if key == "auditData" {
             if let Value::Object(map) = value {
-                for (nested_key, nested_value) in map {
-                    // Skip odata type annotations – they are meta-data noise.
-                    if nested_key.starts_with('@') {
-                        continue;
-                    }
-                    let gelf_nested_value = match nested_value {
-                        Value::Null => continue,
-                        Value::String(_) | Value::Number(_) => nested_value.clone(),
-                        other => Value::String(other.to_string()),
-                    };
-                    gelf.insert(format!("_auditData_{}", nested_key), gelf_nested_value);
-                }
+                flatten_object_into_gelf(map, "_auditData", &mut gelf);
             }
             continue;
         }
@@ -423,12 +458,40 @@ mod tests {
         assert_eq!(parsed["_auditData_ClientIP"], "4.210.128.168", "_auditData_ClientIP must be a string");
         assert_eq!(parsed["_auditData_Operation"], "FileAccessedExtended", "_auditData_Operation must be a string");
         assert!(parsed["_auditData_RecordType"].is_number(), "_auditData_RecordType must be a number");
-        // Nested objects are coerced to a string
-        assert!(parsed["_auditData_AppAccessContext"].is_string(), "_auditData_AppAccessContext must be coerced to a string");
+        // Nested objects are recursively flattened
+        assert_eq!(parsed["_auditData_AppAccessContext_AADSessionId"], "abc",
+            "_auditData_AppAccessContext_AADSessionId must be flattened from the nested object");
+        assert_eq!(parsed["_auditData_AppAccessContext_ClientAppName"], "App Service",
+            "_auditData_AppAccessContext_ClientAppName must be flattened from the nested object");
+        assert!(parsed.get("_auditData_AppAccessContext").is_none(),
+            "_auditData_AppAccessContext must not appear as a raw string after flattening");
         // odata type annotations are dropped
         assert!(parsed.get("_auditData_@odata.type").is_none(), "odata type annotations must be omitted");
         // Null sub-fields are omitted
         assert!(parsed.get("_auditData_NullField").is_none(), "null auditData fields must be omitted");
+    }
+
+    #[test]
+    fn gelf_message_flattens_audit_data_string_encoded_nested_object() {
+        // Some Graph API responses serialise sub-objects as escaped JSON strings.
+        // The real-world example is AppAccessContext arriving as a JSON string rather than
+        // a native JSON object.  The flattener must detect this and recurse into it.
+        let mut log = make_log("FileAccessedExtended", "2024-04-24T10:00:00");
+        log.insert("auditData".to_string(), serde_json::json!({
+            "ClientIP": "4.210.128.168",
+            "AppAccessContext": "{\"@odata.type\":\"#microsoft.graph.security.defaultAuditData\",\"AADSessionId\":\"004db2b9-de97-c009-44f9-214e4f43b48d\",\"ClientAppId\":\"b15665d9-eda6-4092-8539-0eec376afd59\",\"ClientAppName\":\"rclone\"}"
+        }));
+        let json_str = build_gelf_message(&log, "myhost").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        // The string-encoded object must be parsed and its fields promoted
+        assert_eq!(parsed["_auditData_AppAccessContext_AADSessionId"], "004db2b9-de97-c009-44f9-214e4f43b48d");
+        assert_eq!(parsed["_auditData_AppAccessContext_ClientAppName"], "rclone");
+        // OData annotation inside the string-encoded object must also be dropped
+        assert!(parsed.get("_auditData_AppAccessContext_@odata.type").is_none(),
+            "odata annotations inside string-encoded nested objects must be omitted");
+        // The raw string field must not appear
+        assert!(parsed.get("_auditData_AppAccessContext").is_none(),
+            "_auditData_AppAccessContext must not appear as a raw string");
     }
 
     #[test]
