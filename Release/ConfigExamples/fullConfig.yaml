@@ -40,9 +40,11 @@ output:  # Make sure to remove or comment out all outputs you do not intend to u
     path: 'output.csv'
     separator: ';'
 #  graylog:
-#    enabled: False
 #    address: localhost
 #    port: 5555
+#    # format: raw    # Default. Sends raw JSON; requires a JSON extractor on the Raw/Plaintext TCP input.
+#    # format: gelf   # Sends GELF to a GELF TCP input. No extractor needed.
+#    # host: office365-audit-collector  # Reported as the GELF 'host' field (only used when format is gelf).
 #  fluentd:
 #    enabled: True
 #    tenantName: myorg
