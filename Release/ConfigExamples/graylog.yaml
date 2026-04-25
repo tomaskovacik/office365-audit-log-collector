@@ -10,5 +10,5 @@ output:
     address: localhost
     port: 5555
     # format: raw    # Default. Send raw JSON; requires a JSON extractor on the Graylog Raw/Plaintext TCP input.
-    # format: gelf   # Send GELF (Graylog Extended Log Format) to a Graylog GELF TCP input. No extractor needed.
+    # format: gelf   # Send GELF (Graylog Extended Log Format) to a Graylog GELF UDP input. No extractor needed.
     # host: office365-audit-collector  # Value used as the GELF 'host' field (only relevant when format is gelf).

@@ -259,7 +259,7 @@ fn flatten_object_into_gelf(map: &Map<String, Value>, prefix: &str, gelf: &mut M
 /// - `timestamp`: Unix epoch as a floating-point number derived from `CreationTime`
 ///
 /// All other audit log fields are included as GELF additional fields, prefixed with `_`.
-/// When received by a `GELF TCP` Graylog input these become first-class message fields,
+/// When received by a `GELF UDP` or `GELF TCP` Graylog input these become first-class message fields,
 /// removing the need for a JSON extractor.
 pub fn build_gelf_message(log: &ArbitraryJson, host: &str) -> Result<String, std::io::Error> {
 
