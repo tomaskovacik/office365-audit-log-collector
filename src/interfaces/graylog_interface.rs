@@ -305,20 +305,15 @@ pub fn build_gelf_message(log: &ArbitraryJson, host: &str) -> Result<String, std
             }
             continue;
         }
-        // GELF additional fields must be strings or numbers.  Arrays, objects, booleans, and
-        // nulls are not permitted.  Null fields are omitted entirely to avoid inserting a
-        // meaningless string "null" into Graylog (e.g. Graph API records often send clientIp as
-        // null when no IP is present).  Other non-scalar values are coerced to their JSON string
-        // representation so that Graylog does not silently drop the entire message.  Office 365
-        // audit logs commonly contain array-valued fields such as `Parameters`,
-        // `ExtendedProperties`, and `Actor`.
-        let gelf_value = match value {
-            Value::Null => continue,
-            Value::String(_) | Value::Number(_) => value.clone(),
-            other => Value::String(other.to_string()),
-        };
+        // Recursively flatten all remaining fields.  This handles Office Management API
+        // records whose top-level values may be nested objects, arrays of objects (e.g.
+        // `Parameters`, `ExtendedProperties`, `Actor`, `Folders`), strings that embed JSON
+        // objects/arrays, booleans, numbers, and nulls.  Null values are omitted; booleans
+        // are coerced to their string representation; scalars are kept as-is; objects and
+        // arrays are expanded with `_` / 0-based-index suffixes recursively so every leaf
+        // value becomes its own searchable GELF field.
         let gelf_key = format!("_{}", key);
-        gelf.insert(gelf_key, gelf_value);
+        flatten_value_into_gelf(value, &gelf_key, &mut gelf);
     }
 
     serde_json::to_string(&gelf)
@@ -378,22 +373,26 @@ mod tests {
     }
 
     #[test]
-    fn gelf_message_coerces_array_value_to_string() {
+    fn gelf_message_flattens_top_level_array() {
         let mut log = make_log("FileAccessed", "2024-04-24T10:00:00");
         log.insert("Parameters".to_string(), serde_json::json!([{"Name": "foo", "Value": "bar"}]));
         let json_str = build_gelf_message(&log, "myhost").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        // Must be a string, not an array
-        assert!(parsed["_Parameters"].is_string(), "_Parameters must be coerced to a string");
+        // Raw array must not appear; elements must be index-expanded
+        assert!(parsed.get("_Parameters").is_none(), "_Parameters must be flattened, not stored as a string");
+        assert_eq!(parsed["_Parameters_0_Name"], "foo");
+        assert_eq!(parsed["_Parameters_0_Value"], "bar");
     }
 
     #[test]
-    fn gelf_message_coerces_object_value_to_string() {
+    fn gelf_message_flattens_top_level_object() {
         let mut log = make_log("FileAccessed", "2024-04-24T10:00:00");
         log.insert("Nested".to_string(), serde_json::json!({"key": "value"}));
         let json_str = build_gelf_message(&log, "myhost").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        assert!(parsed["_Nested"].is_string(), "_Nested must be coerced to a string");
+        // Raw object must not appear; its fields must be promoted
+        assert!(parsed.get("_Nested").is_none(), "_Nested must be flattened, not stored as a string");
+        assert_eq!(parsed["_Nested_key"], "value");
     }
 
     #[test]
