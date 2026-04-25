@@ -251,14 +251,14 @@ automatically — **no extractor is required**.
 output:
   graylog:
     address: localhost
-    port: 12201          # default GELF TCP port
+    port: 12201          # default GELF UDP port
     format: gelf
     host: office365-audit-collector   # optional; identifies the sender in Graylog
 ```
 
 **Graylog input:**
 
-Navigate to **System > Inputs > Launch new input**, select **GELF TCP**, and set the port to match
+Navigate to **System > Inputs > Launch new input**, select **GELF UDP**, and set the port to match
 the `port` value above (e.g. `12201`). No extractor configuration is needed.
 
 ---
