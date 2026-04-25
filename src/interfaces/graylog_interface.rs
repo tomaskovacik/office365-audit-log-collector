@@ -185,17 +185,60 @@ pub fn add_timestamp_field(log: &mut ArbitraryJson) -> Result<(), std::io::Error
     Ok(())
 }
 
+/// Recursively flatten a single JSON value into GELF additional fields under `prefix`.
+///
+/// Dispatch rules (applied at every nesting level):
+/// - `Null`   → omit entirely.
+/// - `Object` → iterate keys, skip `@`-prefixed OData annotations, recurse for each entry.
+/// - `Array`  → iterate elements with a 0-based index suffix, recurse for each element.
+/// - `String` → if the content parses as a JSON object or array, recurse into it;
+///              otherwise keep as-is.
+/// - `Number` → insert directly (kept as a JSON number, not coerced to a string).
+/// - `Bool`   → coerce to its JSON string representation.
+fn flatten_value_into_gelf(value: &Value, prefix: &str, gelf: &mut Map<String, Value>) {
+    match value {
+        Value::Null => {}
+        Value::Object(map) => {
+            flatten_object_into_gelf(map, prefix, gelf);
+        }
+        Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                let field_name = format!("{}_{}", prefix, i);
+                flatten_value_into_gelf(item, &field_name, gelf);
+            }
+        }
+        Value::String(s) => {
+            let trimmed = s.trim_start();
+            // If the string is itself a JSON object or array, parse and recurse so that
+            // fields serialised as escaped JSON (e.g. AppAccessContext, Folders) become
+            // individual searchable GELF fields.
+            if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+                    match &parsed {
+                        Value::Object(_) | Value::Array(_) => {
+                            flatten_value_into_gelf(&parsed, prefix, gelf);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            gelf.insert(prefix.to_string(), value.clone());
+        }
+        Value::Number(_) => {
+            gelf.insert(prefix.to_string(), value.clone());
+        }
+        other => {
+            gelf.insert(prefix.to_string(), Value::String(other.to_string()));
+        }
+    }
+}
+
 /// Recursively flatten a JSON object into GELF additional fields.
 ///
-/// Each key in `map` is appended to `prefix` (separated by `_`) to form the GELF field name.
-/// - `null` values are omitted entirely.
-/// - Nested `Object` values are recursed into, extending the prefix.
-/// - String values that happen to be valid JSON objects are parsed and recursed into so that
-///   fields serialised as escaped JSON strings (e.g. `AppAccessContext`) are also fully
-///   expanded.  Strings that are not JSON objects are kept as-is.
-/// - `@`-prefixed keys (OData annotations) are skipped at every level of nesting.
-/// - `Array` and `Bool` values are coerced to their JSON string representation so that
-///   Graylog does not silently drop the entire message.
+/// Each key in `map` is appended to `prefix` (separated by `_`) to form the GELF field name,
+/// then delegated to `flatten_value_into_gelf` for further recursion.
+/// `@`-prefixed OData annotation keys are skipped at every level.
 fn flatten_object_into_gelf(map: &Map<String, Value>, prefix: &str, gelf: &mut Map<String, Value>) {
     for (key, value) in map {
         // Skip OData type annotations – they are meta-data noise.
@@ -203,30 +246,7 @@ fn flatten_object_into_gelf(map: &Map<String, Value>, prefix: &str, gelf: &mut M
             continue;
         }
         let field_name = format!("{}_{}", prefix, key);
-        match value {
-            Value::Null => {}
-            Value::Object(nested_map) => {
-                flatten_object_into_gelf(nested_map, &field_name, gelf);
-            }
-            Value::String(s) => {
-                // If the string is itself a JSON object, parse and recurse so that fields
-                // like `AppAccessContext` (often serialised as an escaped JSON string by
-                // the Graph API) become individual searchable GELF fields.
-                if s.trim_start().starts_with('{') {
-                    if let Ok(Value::Object(parsed_map)) = serde_json::from_str::<Value>(s) {
-                        flatten_object_into_gelf(&parsed_map, &field_name, gelf);
-                        continue;
-                    }
-                }
-                gelf.insert(field_name, value.clone());
-            }
-            Value::Number(_) => {
-                gelf.insert(field_name, value.clone());
-            }
-            other => {
-                gelf.insert(field_name, Value::String(other.to_string()));
-            }
-        }
+        flatten_value_into_gelf(value, &field_name, gelf);
     }
 }
 
@@ -500,6 +520,60 @@ mod tests {
         log.insert("CreationTime".to_string(), Value::String("2024-04-24T10:00:00".to_string()));
         add_timestamp_field(&mut log).unwrap();
         assert!(log.contains_key("timestamp"));
+    }
+
+    #[test]
+    fn gelf_message_flattens_audit_data_array() {
+        // auditData may contain array-valued fields whose elements are objects.
+        // Each element must be expanded with a 0-based index suffix.
+        let mut log = make_log("FolderBind", "2026-04-25T05:33:44");
+        log.insert("auditData".to_string(), serde_json::json!({
+            "ClientIP": "1.2.3.4",
+            "Folders": [
+                {
+                    "Id": "folder-001",
+                    "FolderItems": [
+                        {"CreationTime": "2026-04-25T05:33:44Z", "Id": "item-001"},
+                        {"CreationTime": "2026-04-25T05:33:45Z", "Id": "item-002"}
+                    ]
+                },
+                {
+                    "Id": "folder-002",
+                    "FolderItems": []
+                }
+            ]
+        }));
+        let json_str = build_gelf_message(&log, "myhost").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        // Raw array field must not appear
+        assert!(parsed.get("_auditData_Folders").is_none(),
+            "_auditData_Folders must be flattened, not stored as an array string");
+        // First folder scalar
+        assert_eq!(parsed["_auditData_Folders_0_Id"], "folder-001");
+        // Nested array inside first folder
+        assert_eq!(parsed["_auditData_Folders_0_FolderItems_0_Id"], "item-001");
+        assert_eq!(parsed["_auditData_Folders_0_FolderItems_0_CreationTime"], "2026-04-25T05:33:44Z");
+        assert_eq!(parsed["_auditData_Folders_0_FolderItems_1_Id"], "item-002");
+        // Second folder scalar
+        assert_eq!(parsed["_auditData_Folders_1_Id"], "folder-002");
+    }
+
+    #[test]
+    fn gelf_message_flattens_audit_data_string_encoded_array() {
+        // Some Graph API responses serialise array-valued sub-fields as escaped JSON strings.
+        // The flattener must detect the leading '[' and expand them.
+        let mut log = make_log("FolderBind", "2026-04-25T05:33:44");
+        log.insert("auditData".to_string(), serde_json::json!({
+            "ClientIP": "1.2.3.4",
+            "Folders": "[{\"Id\":\"folder-str-001\",\"FolderItems\":[{\"Id\":\"item-str-001\"}]}]"
+        }));
+        let json_str = build_gelf_message(&log, "myhost").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        // Raw string field must not appear
+        assert!(parsed.get("_auditData_Folders").is_none(),
+            "_auditData_Folders must not appear as a raw string");
+        assert_eq!(parsed["_auditData_Folders_0_Id"], "folder-str-001");
+        assert_eq!(parsed["_auditData_Folders_0_FolderItems_0_Id"], "item-str-001");
     }
 }
 
