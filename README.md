@@ -254,12 +254,16 @@ output:
     port: 12201          # default GELF UDP port
     format: gelf
     host: office365-audit-collector   # optional; identifies the sender in Graylog
+    # protocol: udp      # default; use "tcp" to switch to GELF TCP instead
 ```
 
 **Graylog input:**
 
 Navigate to **System > Inputs > Launch new input**, select **GELF UDP**, and set the port to match
 the `port` value above (e.g. `12201`). No extractor configuration is needed.
+
+> **Tip:** If you prefer TCP, set `protocol: tcp` in the collector config and use a **GELF TCP**
+> input in Graylog instead.
 
 ---
 
