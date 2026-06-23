@@ -18,6 +18,7 @@ pub struct GraylogInterface {
     format: GraylogFormat,
     host: String,
     protocol: GraylogProtocol,
+    tcp_socket: Option<TcpStream>,
 }
 
 impl GraylogInterface {
@@ -30,32 +31,61 @@ impl GraylogInterface {
         let format = graylog_cfg.format.clone().unwrap_or(GraylogFormat::Raw);
         let host = graylog_cfg.host.clone().unwrap_or_else(|| "office365-audit-collector".to_string());
         let protocol = graylog_cfg.protocol.clone().unwrap_or(GraylogProtocol::Udp);
-        let interface = GraylogInterface {
+
+        // Establish and validate the TCP connection at startup.
+        // UDP is connectionless so there is nothing to test at startup.
+        let tcp_socket = if protocol == GraylogProtocol::Tcp {
+            Some(Self::open_tcp_socket(&address, port)?)
+        } else {
+            None
+        };
+
+        Ok(GraylogInterface {
             address,
             port,
             format,
             host,
             protocol,
-        };
-
-        // Test TCP connection at startup to catch misconfigured address/port early.
-        // UDP is connectionless so there is nothing to test at startup.
-        if interface.protocol == GraylogProtocol::Tcp {
-            interface.get_tcp_socket()?;
-        }
-        Ok(interface)
+            tcp_socket,
+        })
     }
 }
 
 impl GraylogInterface {
-    fn get_tcp_socket(&self) -> Result<TcpStream, std::io::Error> {
-
-        let ip_addr = (self.address.clone(), self.port)
+    fn open_tcp_socket(address: &str, port: u16) -> Result<TcpStream, std::io::Error> {
+        let ip_addr = (address, port)
             .to_socket_addrs()
             .map_err(|e| std::io::Error::new(e.kind(), format!("Unable to resolve the IP address: {}", e)))?
             .next()
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "DNS resolution returned no IP addresses"))?;
         TcpStream::connect_timeout(&ip_addr, Duration::from_secs(10))
+    }
+
+    fn tcp_send(&mut self, framed: &[u8]) {
+        // Try the existing connection; on any error drop it and reconnect once.
+        let first_try = self.tcp_socket.as_mut()
+            .map(|s| s.write_all(framed).and_then(|_| s.flush()));
+
+        match first_try {
+            Some(Ok(())) => return,
+            Some(Err(e)) => {
+                debug!("Graylog TCP write failed ({}), reconnecting.", e);
+                self.tcp_socket = None;
+            }
+            None => {}
+        }
+
+        let address = self.address.clone();
+        let port = self.port;
+        match Self::open_tcp_socket(&address, port) {
+            Ok(mut socket) => {
+                match socket.write_all(framed).and_then(|_| socket.flush()) {
+                    Ok(()) => { self.tcp_socket = Some(socket); }
+                    Err(e) => warn!("Could not send log to Graylog interface: {}", e),
+                }
+            }
+            Err(e) => warn!("Could not connect to Graylog interface on: {}:{} with: {}", address, port, e),
+        }
     }
 }
 
@@ -98,14 +128,6 @@ impl Interface for GraylogInterface {
 
                 let bytes = serialized.into_bytes();
 
-                // Print the serialized message to stdout so it can be inspected when debugging
-                // connectivity issues.
-                let printable = std::str::from_utf8(&bytes).unwrap_or("<non-utf8>");
-                println!("[graylog-debug] sending to {}:{} ({}): {}", self.address, self.port,
-                    if self.protocol == GraylogProtocol::Udp { "udp" } else { "tcp" }, printable);
-                debug!("[graylog-debug] sending to {}:{} ({}): {}", self.address, self.port,
-                    if self.protocol == GraylogProtocol::Udp { "udp" } else { "tcp" }, printable);
-
                 match self.protocol {
                     GraylogProtocol::Udp => {
                         // GELF over UDP: the payload is the raw GELF message with no framing.
@@ -136,15 +158,7 @@ impl Interface for GraylogInterface {
                         if self.format == GraylogFormat::Gelf {
                             framed.push(0u8);
                         }
-                        match self.get_tcp_socket() {
-                            Ok(mut socket) => {
-                                socket.write_all(&framed).unwrap_or_else(
-                                    |e| warn!("Could not send log to Graylog interface: {}", e));
-                                socket.flush().unwrap_or_else(
-                                    |e| warn!("Could not send log to Graylog interface: {}", e));
-                            }
-                            Err(e) => warn!("Could not connect to Graylog interface on: {}:{} with: {}", self.address, self.port, e),
-                        }
+                        self.tcp_send(&framed);
                     }
                 }
             }
