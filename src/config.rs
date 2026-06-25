@@ -3,7 +3,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_derive::Deserialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufReader, LineWriter, Read, Write};
 use std::path::Path;
 
@@ -70,6 +70,22 @@ impl Config {
         let file_name = Path::new("known_blobs");
         let mut path = Path::new(working_dir).join(file_name);
         self.load_known_content(path.as_mut_os_string())
+    }
+
+    pub fn check_known_blobs_writable(&self) -> std::io::Result<()> {
+        let working_dir = self
+            .collect
+            .working_dir
+            .as_deref()
+            .unwrap_or("./");
+        let path = Path::new(working_dir).join("known_blobs");
+        if path.exists() {
+            OpenOptions::new().write(true).open(&path).map(|_| ())
+        } else {
+            // File doesn't exist yet; check the parent directory is writable by probing a temp file.
+            let probe = Path::new(working_dir).join(".known_blobs_write_test");
+            File::create(&probe).and_then(|_| std::fs::remove_file(&probe))
+        }
     }
 
     pub fn save_known_blobs(&mut self, known_blobs: &HashMap<String, String>) {

@@ -126,6 +126,9 @@ impl Collector {
         api.subscribe_to_feeds().await?;
 
         let known_blobs = config.load_known_blobs();
+        config.check_known_blobs_writable().map_err(|e| {
+            anyhow::anyhow!("known_blobs is not writable, aborting to prevent duplicate log delivery: {}", e)
+        })?;
         let sign_in_enabled = args
             .entra_signin
             .unwrap_or(config.collect.content_types.entra_id_sign_ins_enabled());
