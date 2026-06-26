@@ -38,6 +38,20 @@ impl GraylogInterface {
         let address = graylog_cfg.address.clone();
         let port = graylog_cfg.port;
         let format = graylog_cfg.format.clone().unwrap_or(GraylogFormat::Raw);
+        if format == GraylogFormat::Raw {
+            if graylog_cfg.host.is_some() {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "'host' is set in the Graylog config but 'format' is 'raw' or not set — 'host' is only used with 'format: gelf'",
+                ));
+            }
+            if graylog_cfg.protocol.is_some() {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "'protocol' is set in the Graylog config but 'format' is 'raw' or not set — 'protocol' is only used with 'format: gelf'",
+                ));
+            }
+        }
         let host = graylog_cfg.host.clone().unwrap_or_else(|| "office365-audit-collector".to_string());
         let protocol = graylog_cfg.protocol.clone().unwrap_or(GraylogProtocol::Udp);
 
