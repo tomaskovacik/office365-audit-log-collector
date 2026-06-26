@@ -37,7 +37,17 @@ output:
     #            "template": {
     #              "settings": {
     #                "index.mapping.total_fields.limit": 3000
+    #              },
+    #              "mappings": {
+    #                "properties": {
+    #                  "timestamp": { "type": "date" }
+    #                }
     #              }
     #            },
     #            "priority": 100
     #          }'
+    #
+    # NOTE: The mappings above fix the "timestamp" field type. If you previously used format: raw,
+    # the timestamp field may already be mapped as "text" in the current index, causing aggregation
+    # errors. The template only applies to new indices — you must rotate the current index
+    # (System -> Indices -> your index set -> "Rotate active write index") for the fix to take effect.
