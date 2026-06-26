@@ -1,6 +1,7 @@
 use std::io::{ErrorKind, Write};
 use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use log::{debug, warn};
@@ -11,6 +12,14 @@ use crate::interfaces::interface::Interface;
 
 /// Maximum payload size for a single GELF UDP datagram (per the GELF specification).
 const GELF_UDP_MAX_BYTES: usize = 8192;
+/// Data bytes per chunk: 8192 minus the 12-byte GELF chunk header.
+const GELF_CHUNK_DATA_SIZE: usize = 8180;
+/// GELF spec maximum number of chunks per message.
+const GELF_MAX_CHUNKS: usize = 128;
+/// Magic bytes that identify a chunked GELF UDP datagram.
+const GELF_CHUNKED_MAGIC: [u8; 2] = [0x1e, 0x0f];
+
+static GELF_MSG_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct GraylogInterface {
     address: String,
@@ -59,6 +68,42 @@ impl GraylogInterface {
             .next()
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "DNS resolution returned no IP addresses"))?;
         TcpStream::connect_timeout(&ip_addr, Duration::from_secs(10))
+    }
+
+    fn udp_send(socket: &UdpSocket, addr: &str, bytes: &[u8]) {
+        if bytes.len() <= GELF_UDP_MAX_BYTES {
+            socket.send_to(bytes, addr).unwrap_or_else(
+                |e| { warn!("Could not send log to Graylog via UDP: {}", e); 0 });
+            return;
+        }
+
+        let chunks: Vec<&[u8]> = bytes.chunks(GELF_CHUNK_DATA_SIZE).collect();
+        if chunks.len() > GELF_MAX_CHUNKS {
+            warn!(
+                "GELF message requires {} chunks which exceeds the GELF maximum of {}, skipping.",
+                chunks.len(), GELF_MAX_CHUNKS
+            );
+            return;
+        }
+
+        let count = GELF_MSG_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let msg_id = (count ^ now).to_be_bytes();
+        let chunk_count = chunks.len() as u8;
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            let mut packet = Vec::with_capacity(12 + chunk.len());
+            packet.extend_from_slice(&GELF_CHUNKED_MAGIC);
+            packet.extend_from_slice(&msg_id);
+            packet.push(i as u8);
+            packet.push(chunk_count);
+            packet.extend_from_slice(chunk);
+            socket.send_to(&packet, addr).unwrap_or_else(
+                |e| { warn!("Could not send GELF chunk {}/{} to Graylog via UDP: {}", i + 1, chunk_count, e); 0 });
+        }
     }
 
     fn tcp_send(&mut self, framed: &[u8]) {
@@ -130,22 +175,10 @@ impl Interface for GraylogInterface {
 
                 match self.protocol {
                     GraylogProtocol::Udp => {
-                        // GELF over UDP: the payload is the raw GELF message with no framing.
-                        // The GELF specification limits a single UDP datagram to 8192 bytes.
-                        // Larger payloads would require GELF chunking which is not implemented;
-                        // warn and skip rather than send a truncated or malformed message.
-                        if bytes.len() > GELF_UDP_MAX_BYTES {
-                            warn!(
-                                "GELF message is {} bytes which exceeds the UDP maximum of {} bytes, skipping.",
-                                bytes.len(), GELF_UDP_MAX_BYTES
-                            );
-                            continue;
-                        }
                         match UdpSocket::bind("0.0.0.0:0") {
                             Ok(socket) => {
                                 let addr = format!("{}:{}", self.address, self.port);
-                                socket.send_to(&bytes, &addr).unwrap_or_else(
-                                    |e| { warn!("Could not send log to Graylog via UDP: {}", e); 0 });
+                                Self::udp_send(&socket, &addr, &bytes);
                             }
                             Err(e) => warn!("Could not bind UDP socket for Graylog: {}", e),
                         }
@@ -587,6 +620,28 @@ mod tests {
             "_auditData_Folders must not appear as a raw string");
         assert_eq!(parsed["_auditData_Folders_0_Id"], "folder-str-001");
         assert_eq!(parsed["_auditData_Folders_0_FolderItems_0_Id"], "item-str-001");
+    }
+
+    #[test]
+    fn udp_send_chunks_oversized_message() {
+        use std::net::UdpSocket;
+        // Build a payload larger than 8192 bytes.
+        let payload = vec![b'x'; GELF_UDP_MAX_BYTES + 1];
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = format!("127.0.0.1:{}", server.local_addr().unwrap().port());
+        let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+
+        GraylogInterface::udp_send(&socket, &addr, &payload);
+
+        // We expect two chunks (8180 + remaining bytes), each with the 12-byte header.
+        let mut buf = [0u8; 9000];
+        let n1 = server.recv(&mut buf).unwrap();
+        let n2 = server.recv(&mut buf).unwrap();
+        assert!(n1 > 12 && n2 > 12, "each chunk must have a header and data");
+        assert_eq!(&buf[..2], &GELF_CHUNKED_MAGIC, "first chunk must start with magic bytes");
+        // Total data across both chunks must equal the original payload length.
+        assert_eq!((n1 - 12) + (n2 - 12), payload.len());
     }
 }
 

@@ -3,7 +3,7 @@ use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use chrono::Utc;
 use futures::{stream, StreamExt};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, Mac, KeyInit};
 use log::{error, info, warn};
 use sha2::Sha256;
 use crate::config::Config;

@@ -3,7 +3,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_derive::Deserialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufReader, LineWriter, Read, Write};
 use std::path::Path;
 
@@ -70,6 +70,22 @@ impl Config {
         let file_name = Path::new("known_blobs");
         let mut path = Path::new(working_dir).join(file_name);
         self.load_known_content(path.as_mut_os_string())
+    }
+
+    pub fn check_known_blobs_writable(&self) -> std::io::Result<()> {
+        let working_dir = self
+            .collect
+            .working_dir
+            .as_deref()
+            .unwrap_or("./");
+        let path = Path::new(working_dir).join("known_blobs");
+        if path.exists() {
+            OpenOptions::new().write(true).open(&path).map(|_| ())
+        } else {
+            // File doesn't exist yet; check the parent directory is writable by probing a temp file.
+            let probe = Path::new(working_dir).join(".known_blobs_write_test");
+            File::create(&probe).and_then(|_| std::fs::remove_file(&probe))
+        }
     }
 
     pub fn save_known_blobs(&mut self, known_blobs: &HashMap<String, String>) {
@@ -181,6 +197,8 @@ pub struct ContentTypesSubConfig {
     pub exchange_mailbox_graph: Option<bool>,
     #[serde(rename = "Audit.Intune")]
     pub intune: Option<bool>,
+    #[serde(rename = "Audit.IdentityProtectionRiskDetections")]
+    pub identity_protection_risk_detections: Option<bool>,
 }
 impl ContentTypesSubConfig {
     pub fn get_management_content_type_strings(&self) -> Vec<String> {
@@ -223,6 +241,10 @@ impl ContentTypesSubConfig {
         self.intune.unwrap_or(false)
     }
 
+    pub fn identity_protection_risk_detections_enabled(&self) -> bool {
+        self.identity_protection_risk_detections.unwrap_or(false)
+    }
+
     pub fn get_content_type_strings(&self) -> Vec<String> {
         let mut results = self.get_management_content_type_strings();
         results.extend(self.get_graph_content_type_strings());
@@ -245,6 +267,9 @@ impl ContentTypesSubConfig {
         }
         if self.intune_enabled() {
             results.push("Intune".to_string());
+        }
+        if self.identity_protection_risk_detections_enabled() {
+            results.push("IdentityProtection.RiskDetections".to_string());
         }
         results
     }
@@ -272,6 +297,8 @@ pub struct FilterSubConfig {
     pub exchange_mailbox_graph: Option<ArbitraryJson>,
     #[serde(rename = "Audit.Intune")]
     pub intune: Option<ArbitraryJson>,
+    #[serde(rename = "Audit.IdentityProtectionRiskDetections")]
+    pub identity_protection_risk_detections: Option<ArbitraryJson>,
 }
 impl FilterSubConfig {
     pub fn get_filters(&self) -> HashMap<String, ArbitraryJson> {
@@ -305,6 +332,9 @@ impl FilterSubConfig {
         }
         if let Some(filter) = self.intune.as_ref() {
             results.insert("Intune".to_string(), filter.clone());
+        }
+        if let Some(filter) = self.identity_protection_risk_detections.as_ref() {
+            results.insert("IdentityProtection.RiskDetections".to_string(), filter.clone());
         }
         results
     }
@@ -382,6 +412,7 @@ mod tests {
             entra_id_sign_ins: Some(true),
             exchange_mailbox_graph: None,
             intune: None,
+            identity_protection_risk_detections: None,
         };
 
         assert_eq!(
@@ -412,6 +443,7 @@ mod tests {
             entra_id_sign_ins: None,
             exchange_mailbox_graph: None,
             intune: None,
+            identity_protection_risk_detections: None,
         };
 
         let types = content_types.get_content_type_strings();
@@ -438,6 +470,7 @@ mod tests {
             entra_id_sign_ins: None,
             exchange_mailbox_graph: Some(true),
             intune: None,
+            identity_protection_risk_detections: None,
         };
 
         let types = content_types.get_content_type_strings();
@@ -465,12 +498,41 @@ mod tests {
             entra_id_sign_ins: None,
             exchange_mailbox_graph: None,
             intune: Some(true),
+            identity_protection_risk_detections: None,
         };
 
         let types = content_types.get_content_type_strings();
         assert!(
             types.contains(&"Intune".to_string()),
             "Intune should be enabled"
+        );
+        assert_eq!(
+            content_types.get_management_content_type_strings().len(),
+            0,
+            "management API types should be empty"
+        );
+    }
+
+    #[test]
+    fn identity_protection_risk_detections_enabled_when_set() {
+        let content_types = ContentTypesSubConfig {
+            general: None,
+            azure_active_directory: None,
+            exchange: None,
+            share_point: None,
+            dlp: None,
+            ual_graph: None,
+            entra_id: None,
+            entra_id_sign_ins: None,
+            exchange_mailbox_graph: None,
+            intune: None,
+            identity_protection_risk_detections: Some(true),
+        };
+
+        let types = content_types.get_content_type_strings();
+        assert!(
+            types.contains(&"IdentityProtection.RiskDetections".to_string()),
+            "IdentityProtection.RiskDetections should be enabled"
         );
         assert_eq!(
             content_types.get_management_content_type_strings().len(),
