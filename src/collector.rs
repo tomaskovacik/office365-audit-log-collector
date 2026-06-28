@@ -284,7 +284,7 @@ impl Collector {
     }
 
     pub async fn check_results(&mut self) -> usize {
-        if let Ok(Some((msg, content))) = self.result_rx.try_next() {
+        if let Ok((msg, content)) = self.result_rx.try_recv() {
             self.handle_content(msg, content).await
         } else {
             0
@@ -293,7 +293,7 @@ impl Collector {
 
     pub async fn check_all_results(&mut self) -> usize {
         let mut amount = 0;
-        while let Ok(Some((msg, content))) = self.result_rx.try_next() {
+        while let Ok((msg, content)) = self.result_rx.try_recv() {
             amount += self.handle_content(msg, content).await;
         }
         amount
@@ -482,7 +482,7 @@ impl Collector {
         self.output().await;
     }
     pub async fn check_stats(&mut self) -> bool {
-        if let Ok(Some((found, successful, retried, failed))) = self.stats_rx.try_next() {
+        if let Ok((found, successful, retried, failed)) = self.stats_rx.try_recv() {
             self.output().await;
             let output = self.get_output_string(found, successful, failed, retried, self.saved);
             info!("{}", output);
@@ -728,7 +728,7 @@ pub async fn message_loop(
         }
         // Receive status message indicated found content and retrieved content. When all blobs have
         // been found, and all found blobs have been retrieved, we are done.
-        if let Ok(Some(msg)) = config.status_rx.try_next() {
+        if let Ok(msg) = config.status_rx.try_recv() {
             match msg {
                 // We have found a new content blob while iterating through the pages of them.
                 // It has been queued up to be retrieved.
@@ -782,7 +782,7 @@ pub async fn message_loop(
         }
         // Check channel for content pages that could not be retrieved and retry them the user
         // defined amount of times. If we can't in that amount of times then give up.
-        if let Ok(Some((content_type, url))) = config.blob_error_rx.try_next() {
+        if let Ok((content_type, url)) = config.blob_error_rx.try_recv() {
             if retry_map.contains_key(&url) {
                 let retries_left = retry_map.get_mut(&url).unwrap();
                 if retries_left == &mut 0 {
@@ -806,7 +806,7 @@ pub async fn message_loop(
         };
         // Check channel for content blobs that could not be retrieved and retry them the user
         // defined amount of times. If we can't in that amount of times then give up.
-        if let Ok(Some(content)) = config.content_error_rx.try_next() {
+        if let Ok(content) = config.content_error_rx.try_recv() {
             state.lock().await.stats.blobs_retried += 1;
             if retry_map.contains_key(&content.url) {
                 let retries_left = retry_map.get_mut(&content.url).unwrap();
