@@ -7,8 +7,8 @@ rust-version = "1.85"
 
 [dependencies]
 anyhow = "1.0.102"
-tui-scrollview = "0.3.2"
-ratatui = { version = "0.26.1", features = [] }
+tui-scrollview = "0.6.7"
+ratatui = { version = "0.30", features = [] }
 crossterm = { version = "0.27.0", features = ["event-stream"] }
 color-eyre = "0.6.5"
 chrono = "0.4.44"

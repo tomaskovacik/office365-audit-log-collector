@@ -7,6 +7,7 @@ use log::{error, Level, warn};
 use ratatui::{Frame, widgets::*};
 use ratatui::layout::{Constraint, Direction, Layout, Size};
 use ratatui::prelude::*;
+use ratatui::symbols::Marker;
 use ratatui::style::Color;
 use ratatui::widgets::ListItem;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -375,7 +376,7 @@ fn ui(frame: &mut Frame, state: &mut State) {
             Constraint::Length(1),
             Constraint::Length(10),
         ])
-        .split(frame.size());
+        .split(frame.area());
 
     let horizontal_0 = Layout::default()
         .direction(Direction::Horizontal)
@@ -398,7 +399,7 @@ fn ui(frame: &mut Frame, state: &mut State) {
     let horizontal_2 = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(frame.size().width),
+            Constraint::Length(frame.area().width),
             Constraint::Min(1),
         ])
         .split(vertical[2]);
@@ -406,7 +407,7 @@ fn ui(frame: &mut Frame, state: &mut State) {
     let horizontal_3 = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(frame.size().width),
+            Constraint::Length(frame.area().width),
             Constraint::Min(1),
         ])
         .split(vertical[3]);
@@ -414,7 +415,7 @@ fn ui(frame: &mut Frame, state: &mut State) {
     let horizontal_4 = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(frame.size().width),
+            Constraint::Length(frame.area().width),
             Constraint::Min(1),
         ])
         .split(vertical[4]);
@@ -422,14 +423,14 @@ fn ui(frame: &mut Frame, state: &mut State) {
     let horizontal_5 = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(frame.size().width),
+            Constraint::Length(frame.area().width),
             Constraint::Min(1),
         ])
         .split(vertical[5]);
 
     // Connection
     let settings_block = Block::default()
-        .title(block::Title::from("Connection").alignment(Alignment::Center))
+        .title(Line::from("Connection").centered())
         .borders(Borders::ALL);
 
     let mut settings_list_items = Vec::<ListItem>::new();
@@ -513,7 +514,7 @@ fn ui(frame: &mut Frame, state: &mut State) {
 
     // Speed chart
     let chart_block = Block::default()
-        .title(block::Title::from("Performance").alignment(Alignment::Center))
+        .title(Line::from("Performance").centered())
         .borders(Borders::ALL);
     let datasets = vec![
         Dataset::default()
@@ -527,7 +528,7 @@ fn ui(frame: &mut Frame, state: &mut State) {
     let x_axis = Axis::default()
         .style(Style::default().white())
         .bounds([0.0, state.logs_retrieval_speeds.last().unwrap_or(&(10.0, 0.0)).0])
-        .labels(vec![]);
+        .labels(Vec::<Line>::new());
 
     let top_speed = state.logs_retrieval_speeds
         .iter()
@@ -741,7 +742,7 @@ fn ui(frame: &mut Frame, state: &mut State) {
         .collect();
     let table = Table::default()
         .rows(rows)
-        .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol(">>")
         .header(Row::new(header)
             .style(Style::new().bold().underlined())
