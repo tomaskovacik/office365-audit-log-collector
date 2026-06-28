@@ -3,6 +3,9 @@ name: Verify
 on:
   push:
 
+permissions:
+  contents: read
+
 jobs:
   verify:
     runs-on: ubuntu-latest
