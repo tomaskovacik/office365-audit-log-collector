@@ -198,28 +198,17 @@ impl Interface for GraylogInterface {
                         }
                     }
                     GraylogProtocol::Tcp => {
+                        // Both Raw and GELF use the persistent connection to avoid exhausting
+                        // ephemeral ports when sending large batches of logs.
+                        // Raw TCP: newline-delimited JSON (configure Graylog input to split on \n).
+                        // GELF TCP: null-byte framing per the GELF spec.
+                        let mut framed = bytes;
                         if self.format == GraylogFormat::Gelf {
-                            // GELF TCP framing: null byte terminates each message on the
-                            // persistent connection.
-                            let mut framed = bytes;
                             framed.push(0u8);
-                            self.tcp_send(&framed);
                         } else {
-                            // Raw TCP: open a new connection per message so that the
-                            // connection-close acts as the message boundary, matching the
-                            // original behaviour expected by Graylog's Raw/Plaintext TCP input.
-                            let address = self.address.clone();
-                            let port = self.port;
-                            match Self::open_tcp_socket(&address, port) {
-                                Ok(mut socket) => {
-                                    socket.write_all(&bytes).unwrap_or_else(
-                                        |e| warn!("Could not send log to Graylog interface: {}", e));
-                                    socket.flush().unwrap_or_else(
-                                        |e| warn!("Could not send log to Graylog interface: {}", e));
-                                }
-                                Err(e) => warn!("Could not connect to Graylog interface on: {}:{} with: {}", address, port, e),
-                            }
+                            framed.push(b'\n');
                         }
+                        self.tcp_send(&framed);
                     }
                 }
             }
@@ -277,9 +266,40 @@ fn flatten_value_into_gelf(value: &Value, prefix: &str, gelf: &mut Map<String, V
             flatten_object_into_gelf(map, prefix, gelf);
         }
         Value::Array(items) => {
-            for (i, item) in items.iter().enumerate() {
-                let field_name = format!("{}_{}", prefix, i);
-                flatten_value_into_gelf(item, &field_name, gelf);
+            // Office 365 uses {"Name": ..., "Value": ...} arrays for ExtendedProperties,
+            // Parameters, and ModifiedProperties.  Flatten these as named fields so that
+            // e.g. ApplicationDisplayName is searchable directly rather than being buried
+            // under a numeric index suffix.  ModifiedProperties also carries OldValue/NewValue.
+            let is_named_kv = !items.is_empty() && items.iter().all(|item| {
+                matches!(item, Value::Object(m) if m.contains_key("Name"))
+            });
+            if is_named_kv {
+                for item in items {
+                    if let Value::Object(m) = item {
+                        let name = m.get("Name").and_then(|v| v.as_str()).unwrap_or("");
+                        if name.is_empty() {
+                            continue;
+                        }
+                        // Promote directly as a top-level GELF field, dropping the container
+                        // prefix (e.g. _ExtendedProperties_ApplicationDisplayName →
+                        // _ApplicationDisplayName). Collisions are extremely unlikely in O365
+                        // audit logs.
+                        if let Some(v) = m.get("Value") {
+                            flatten_value_into_gelf(v, &format!("_{}", name), gelf);
+                        }
+                        if let Some(v) = m.get("OldValue") {
+                            flatten_value_into_gelf(v, &format!("_{}_OldValue", name), gelf);
+                        }
+                        if let Some(v) = m.get("NewValue") {
+                            flatten_value_into_gelf(v, &format!("_{}_NewValue", name), gelf);
+                        }
+                    }
+                }
+            } else {
+                for (i, item) in items.iter().enumerate() {
+                    let field_name = format!("{}_{}", prefix, i);
+                    flatten_value_into_gelf(item, &field_name, gelf);
+                }
             }
         }
         Value::String(s) => {
@@ -453,10 +473,10 @@ mod tests {
         log.insert("Parameters".to_string(), serde_json::json!([{"Name": "foo", "Value": "bar"}]));
         let json_str = build_gelf_message(&log, "myhost").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        // Raw array must not appear; elements must be index-expanded
-        assert!(parsed.get("_Parameters").is_none(), "_Parameters must be flattened, not stored as a string");
-        assert_eq!(parsed["_Parameters_0_Name"], "foo");
-        assert_eq!(parsed["_Parameters_0_Value"], "bar");
+        // Named KV arrays are promoted directly — container prefix is dropped.
+        assert!(parsed.get("_Parameters").is_none(), "_Parameters must be flattened");
+        assert!(parsed.get("_Parameters_0_Name").is_none(), "indexed form must not appear");
+        assert_eq!(parsed["_foo"], "bar");
     }
 
     #[test]
