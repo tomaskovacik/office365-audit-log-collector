@@ -12,3 +12,42 @@ output:
     # format: raw    # Default. Send raw JSON; requires a JSON extractor on the Graylog Raw/Plaintext TCP input.
     # format: gelf   # Send GELF (Graylog Extended Log Format) to a Graylog GELF UDP input. No extractor needed.
     # host: office365-audit-collector  # Value used as the GELF 'host' field (only relevant when format is gelf).
+    #
+    # NOTE: When using format: gelf, Office 365 audit logs contain many nested fields that are flattened into
+    # individual OpenSearch fields. The default OpenSearch field limit (1000) can be exceeded. To raise it,
+    # apply an index template via the OpenSearch API.
+    #
+    # PREREQUISITE: The index template below uses the pattern "o365_*". For it to take effect, messages from
+    # this collector must be routed to a Graylog index set whose index prefix is "o365_".
+    # Configure this in Graylog under System -> Streams -> assign the stream to an index set with prefix "o365_".
+    #
+    # Step 1: Obtain client certificates from the Graylog UI:
+    #   System -> Cluster Configuration -> Certificate Management -> Generate client certificate
+    #   Save cert.crt, key.key, and ca.crt to your host machine.
+    #
+    # Step 2: Apply the index template (run from your host machine, not inside the container):
+    #
+    # curl -X PUT "https://<opensearch-host>:9200/_index_template/o365_fields_limit" \
+    #      --cert ./cert.crt \
+    #      --key ./key.key \
+    #      --cacert ./ca.crt \
+    #      -H 'Content-Type: application/json' \
+    #      -d '{
+    #            "index_patterns": ["o365_*"],
+    #            "template": {
+    #              "settings": {
+    #                "index.mapping.total_fields.limit": 3000
+    #              },
+    #              "mappings": {
+    #                "properties": {
+    #                  "timestamp": { "type": "date" }
+    #                }
+    #              }
+    #            },
+    #            "priority": 100
+    #          }'
+    #
+    # NOTE: The mappings above fix the "timestamp" field type. If you previously used format: raw,
+    # the timestamp field may already be mapped as "text" in the current index, causing aggregation
+    # errors. The template only applies to new indices — you must rotate the current index
+    # (System -> Indices -> your index set -> "Rotate active write index") for the fix to take effect.
