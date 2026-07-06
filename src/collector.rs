@@ -276,6 +276,7 @@ impl Collector {
             self.check_results().await;
         }
         self.check_all_results().await;
+        self.output().await;
         self.end_run();
     }
 

@@ -45,15 +45,15 @@ impl GraylogInterface {
                     "'host' is set in the Graylog config but 'format' is 'raw' or not set — 'host' is only used with 'format: gelf'",
                 ));
             }
-            if graylog_cfg.protocol.is_some() {
-                return Err(std::io::Error::new(
-                    ErrorKind::InvalidInput,
-                    "'protocol' is set in the Graylog config but 'format' is 'raw' or not set — 'protocol' is only used with 'format: gelf'",
-                ));
-            }
         }
         let host = graylog_cfg.host.clone().unwrap_or_else(|| "office365-audit-collector".to_string());
-        let protocol = graylog_cfg.protocol.clone().unwrap_or(GraylogProtocol::Udp);
+        // Raw format defaults to TCP (matches the original behaviour).
+        // GELF format defaults to UDP.
+        let protocol = graylog_cfg.protocol.clone().unwrap_or(if format == GraylogFormat::Raw {
+            GraylogProtocol::Tcp
+        } else {
+            GraylogProtocol::Udp
+        });
 
         // Establish and validate the TCP connection at startup.
         // UDP is connectionless so there is nothing to test at startup.
@@ -198,14 +198,28 @@ impl Interface for GraylogInterface {
                         }
                     }
                     GraylogProtocol::Tcp => {
-                        // GELF TCP framing: each message is terminated with a null byte.
-                        // Raw mode must NOT include the null byte so that Graylog's Raw/Plaintext
-                        // TCP input can parse the JSON without a trailing null corrupting it.
-                        let mut framed = bytes;
                         if self.format == GraylogFormat::Gelf {
+                            // GELF TCP framing: null byte terminates each message on the
+                            // persistent connection.
+                            let mut framed = bytes;
                             framed.push(0u8);
+                            self.tcp_send(&framed);
+                        } else {
+                            // Raw TCP: open a new connection per message so that the
+                            // connection-close acts as the message boundary, matching the
+                            // original behaviour expected by Graylog's Raw/Plaintext TCP input.
+                            let address = self.address.clone();
+                            let port = self.port;
+                            match Self::open_tcp_socket(&address, port) {
+                                Ok(mut socket) => {
+                                    socket.write_all(&bytes).unwrap_or_else(
+                                        |e| warn!("Could not send log to Graylog interface: {}", e));
+                                    socket.flush().unwrap_or_else(
+                                        |e| warn!("Could not send log to Graylog interface: {}", e));
+                                }
+                                Err(e) => warn!("Could not connect to Graylog interface on: {}:{} with: {}", address, port, e),
+                            }
                         }
-                        self.tcp_send(&framed);
                     }
                 }
             }
