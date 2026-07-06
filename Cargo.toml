@@ -1,6 +1,6 @@
 [package]
 name = "office_audit_log_collector"
-version = "2.6.7"
+version = "2.6.8"
 edition = "2024"
 rust-version = "1.85"
 
