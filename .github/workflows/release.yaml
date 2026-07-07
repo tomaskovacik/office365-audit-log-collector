@@ -49,7 +49,7 @@ jobs:
       # It uses the `context` parameter to define the build's context as the set of files located in the specified path. For more information, see "[Usage](https://github.com/docker/build-push-action#usage)" in the README of the `docker/build-push-action` repository.
       # It uses the `tags` and `labels` parameters to tag and label the image with the output from the "meta" step.
       - name: Build and push Docker image
-        uses: docker/build-push-action@ff26911fd365b0233252dfbd8eede1c0e9ef9a51
+        uses: docker/build-push-action@3add1637a63aa04f4e5fa1916f9e12090d90780a
         with:
           context: .
           push: true
