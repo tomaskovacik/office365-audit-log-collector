@@ -21,12 +21,25 @@ const GELF_CHUNKED_MAGIC: [u8; 2] = [0x1e, 0x0f];
 
 static GELF_MSG_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Arrays split into one message per element when the config does not say otherwise.
+/// `Folders` is last so that a `MailItemsAccessed` Bind record splits per mail item, and a
+/// Sync record -- which carries no `FolderItems` -- falls through to one message per folder.
+const DEFAULT_SPLIT_ARRAYS: [&str; 4] =
+    ["FolderItems", "AffectedItems", "MessageItems", "Folders"];
+
+/// Fields coerced to text because Office 365 sends them with an inconsistent type.
+/// `ListBaseType` is `1` on a `FileAccessed` record and `"DocumentLibrary"` on a
+/// `ListViewed` one; a scan of 2422 live records found no other field that varies.
+const DEFAULT_STRING_FIELDS: [&str; 1] = ["ListBaseType"];
+
 pub struct GraylogInterface {
     address: String,
     port: u16,
     format: GraylogFormat,
     host: String,
     protocol: GraylogProtocol,
+    split_arrays: Vec<String>,
+    string_fields: Vec<String>,
     tcp_socket: Option<TcpStream>,
 }
 
@@ -63,12 +76,22 @@ impl GraylogInterface {
             None
         };
 
+        let split_arrays = graylog_cfg.split_arrays.clone().unwrap_or_else(|| {
+            DEFAULT_SPLIT_ARRAYS.iter().map(|s| s.to_string()).collect()
+        });
+
+        let string_fields = graylog_cfg.string_fields.clone().unwrap_or_else(|| {
+            DEFAULT_STRING_FIELDS.iter().map(|s| s.to_string()).collect()
+        });
+
         Ok(GraylogInterface {
             address,
             port,
             format,
             host,
             protocol,
+            split_arrays,
+            string_fields,
             tcp_socket,
         })
     }
@@ -157,7 +180,7 @@ impl Interface for GraylogInterface {
         for logs in all_logs.iter_mut() {
             for log in logs.iter_mut() {
 
-                let serialized = match self.format {
+                let serialized: Vec<String> = match self.format {
                     GraylogFormat::Raw => {
                         match add_timestamp_field(log) {
                             Ok(()) => (),
@@ -167,7 +190,7 @@ impl Interface for GraylogInterface {
                             }
                         }
                         match serde_json::to_string(log) {
-                            Ok(json) => json,
+                            Ok(json) => vec![json],
                             Err(e) => {
                                 warn!("Could not serialize a log in Graylog interface: {}.", e);
                                 continue
@@ -175,8 +198,8 @@ impl Interface for GraylogInterface {
                         }
                     }
                     GraylogFormat::Gelf => {
-                        match build_gelf_message(log, &self.host) {
-                            Ok(json) => json,
+                        match build_gelf_messages(log, &self.host, &self.split_arrays, &self.string_fields) {
+                            Ok(msgs) => msgs,
                             Err(e) => {
                                 warn!("Could not build GELF message in Graylog interface: {}.", e);
                                 continue
@@ -185,6 +208,7 @@ impl Interface for GraylogInterface {
                     }
                 };
 
+                for serialized in serialized {
                 let bytes = serialized.into_bytes();
 
                 match self.protocol {
@@ -210,6 +234,7 @@ impl Interface for GraylogInterface {
                         }
                         self.tcp_send(&framed);
                     }
+                }
                 }
             }
         }
@@ -249,57 +274,127 @@ pub fn add_timestamp_field(log: &mut ArbitraryJson) -> Result<(), std::io::Error
     Ok(())
 }
 
+/// Separators used when several array elements collapse onto one field name.  Nesting depth
+/// picks the separator so that an outer element boundary stays distinguishable from a value
+/// boundary inside it: `"a, b; c, d"` is two elements of two values, not four of one.
+const SEPARATOR_OUTER: &str = "; ";
+const SEPARATOR_INNER: &str = ", ";
+
+fn separator_for_depth(array_depth: usize) -> &'static str {
+    if array_depth <= 1 { SEPARATOR_OUTER } else { SEPARATOR_INNER }
+}
+
 /// Recursively flatten a single JSON value into GELF additional fields under `prefix`.
 ///
 /// Dispatch rules (applied at every nesting level):
 /// - `Null`   → omit entirely.
-/// - `Object` → iterate keys, skip `@`-prefixed OData annotations, recurse for each entry.
-/// - `Array`  → iterate elements with a 0-based index suffix, recurse for each element.
+/// - `Object` → iterate keys, skip OData annotations, recurse for each entry.
+/// - `Array`  → every element writes to the *same* field name (see below), and a
+///              `<prefix>_json` companion preserves the original structure.
 /// - `String` → if the content parses as a JSON object or array, recurse into it;
 ///              otherwise keep as-is.
-/// - `Number` → insert directly (kept as a JSON number, not coerced to a string).
+/// - `Number` → insert directly, unless array-derived (see `in_array`).
 /// - `Bool`   → coerce to its JSON string representation.
-fn flatten_value_into_gelf(value: &Value, prefix: &str, gelf: &mut Map<String, Value>) {
+///
+/// `in_array` marks values that came from inside an array. Those are always written as
+/// strings, even when a single element makes them look scalar: Graylog serialises a
+/// multi-valued field to text, so a field that is a number for a one-element array and
+/// text for a two-element one would flip type between documents and OpenSearch would
+/// reject the second with a mapping conflict.
+fn flatten_value_into_gelf(
+    value: &Value,
+    prefix: &str,
+    gelf: &mut Map<String, Value>,
+    array_depth: usize,
+) {
     match value {
         Value::Null => {}
         Value::Object(map) => {
-            flatten_object_into_gelf(map, prefix, gelf);
+            flatten_object_into_gelf(map, prefix, gelf, array_depth);
         }
         Value::Array(items) => {
-            // Office 365 uses {"Name": ..., "Value": ...} arrays for ExtendedProperties,
-            // Parameters, and ModifiedProperties.  Flatten these as named fields so that
+            // Office 365 uses {"Name": ..., "Value": ...} entries for ExtendedProperties,
+            // Parameters, and ModifiedProperties.  Promote those as named fields so that
             // e.g. ApplicationDisplayName is searchable directly rather than being buried
             // under a numeric index suffix.  ModifiedProperties also carries OldValue/NewValue.
-            let is_named_kv = !items.is_empty() && items.iter().all(|item| {
-                matches!(item, Value::Object(m) if m.contains_key("Name"))
-            });
-            if is_named_kv {
-                for item in items {
-                    if let Value::Object(m) = item {
-                        let name = m.get("Name").and_then(|v| v.as_str()).unwrap_or("");
-                        if name.is_empty() {
-                            continue;
-                        }
+            //
+            // The decision is made per entry, not per array: a single entry that does not
+            // follow the convention used to demote the whole array to positional field names
+            // (_ExtendedProperties_0_Name = "ApplicationDisplayName"), which turns the field
+            // name into a *value* and hides it from aggregations.
+            let mut any_collapsed = false;
+            for item in items {
+                // Only promote entries that actually carry a value under the convention;
+                // an entry with a Name but no Value/OldValue/NewValue (e.g. AffectedItems)
+                // is a regular object and must keep its own field names, or its contents
+                // would be dropped entirely.
+                let named = match item {
+                    Value::Object(m) => m
+                        .get("Name")
+                        .and_then(|v| v.as_str())
+                        .filter(|n| !n.is_empty())
+                        .filter(|_| {
+                            m.contains_key("Value")
+                                || m.contains_key("OldValue")
+                                || m.contains_key("NewValue")
+                        }),
+                    _ => None,
+                };
+                match (named, item) {
+                    (Some(name), Value::Object(m)) => {
                         // Promote directly as a top-level GELF field, dropping the container
                         // prefix (e.g. _ExtendedProperties_ApplicationDisplayName →
-                        // _ApplicationDisplayName). Collisions are extremely unlikely in O365
-                        // audit logs.
+                        // _ApplicationDisplayName).
+                        let base = format!("_{}", sanitize_field_segment(name));
                         if let Some(v) = m.get("Value") {
-                            flatten_value_into_gelf(v, &format!("_{}", name), gelf);
+                            flatten_value_into_gelf(v, &base, gelf, array_depth + 1);
                         }
                         if let Some(v) = m.get("OldValue") {
-                            flatten_value_into_gelf(v, &format!("_{}_OldValue", name), gelf);
+                            flatten_value_into_gelf(v, &format!("{}_OldValue", base), gelf, array_depth + 1);
                         }
                         if let Some(v) = m.get("NewValue") {
-                            flatten_value_into_gelf(v, &format!("_{}_NewValue", name), gelf);
+                            flatten_value_into_gelf(v, &format!("{}_NewValue", base), gelf, array_depth + 1);
                         }
                     }
+                    _ => {
+                        // Collapse: every element writes to the same field name instead of
+                        // `<prefix>_<i>`.  A positional suffix mints a brand-new field name
+                        // for every array length ever seen, so the mapping grows without
+                        // bound and eventually trips OpenSearch's `total_fields.limit`,
+                        // which rejects the whole document.  Collapsing makes the field set
+                        // a function of the audit schema rather than of the data.
+                        any_collapsed = true;
+                        flatten_value_into_gelf(item, prefix, gelf, array_depth + 1);
+                    }
                 }
-            } else {
-                for (i, item) in items.iter().enumerate() {
-                    let field_name = format!("{}_{}", prefix, i);
-                    flatten_value_into_gelf(item, &field_name, gelf);
+            }
+            // Collapsing loses which value belongs to which element — for a batched record
+            // such as MailItemsAccessed, which Subject went with which item Id.  Keep the
+            // original array verbatim alongside it so nothing is actually lost.  Only for
+            // arrays that genuinely collapsed and hold more than one element: a single
+            // element has no ordering to preserve, and fully promoted key/value arrays are
+            // already reproduced field by field.
+            if array_depth == 0 && any_collapsed && items.len() > 1 {
+                if let Ok(raw) = serde_json::to_string(value) {
+                    gelf.insert(format!("{}_json", prefix), Value::String(raw));
                 }
+            }
+            // How many elements there were is a security signal in its own right: a bulk
+            // delete (MoveToDeletedItems / SoftDelete / HardDelete over hundreds of items)
+            // is what ransomware and mass-exfiltration look like in an audit feed.  The
+            // collapsed fields cannot answer it — identical values are deduplicated, so a
+            // record with 11 items and 9 distinct subjects yields 9 — so record the count
+            // explicitly.  Kept a number so it can be range-queried and alerted on, and
+            // summed rather than overwritten so a nested array reports the total across all
+            // its parents (every FolderItem in the record, not just the last folder's).
+            if any_collapsed {
+                let key = format!("{}_count", prefix);
+                let total = gelf
+                    .get(&key)
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    + items.len() as u64;
+                gelf.insert(key, Value::Number(total.into()));
             }
         }
         Value::String(s) => {
@@ -311,20 +406,53 @@ fn flatten_value_into_gelf(value: &Value, prefix: &str, gelf: &mut Map<String, V
                 if let Ok(parsed) = serde_json::from_str::<Value>(s) {
                     match &parsed {
                         Value::Object(_) | Value::Array(_) => {
-                            flatten_value_into_gelf(&parsed, prefix, gelf);
+                            flatten_value_into_gelf(&parsed, prefix, gelf, array_depth);
                             return;
                         }
                         _ => {}
                     }
                 }
             }
-            gelf.insert(prefix.to_string(), value.clone());
+            insert_or_append(gelf, prefix, value.clone(), array_depth);
         }
         Value::Number(_) => {
-            gelf.insert(prefix.to_string(), value.clone());
+            insert_or_append(gelf, prefix, value.clone(), array_depth);
         }
         other => {
-            gelf.insert(prefix.to_string(), Value::String(other.to_string()));
+            insert_or_append(gelf, prefix, Value::String(other.to_string()), array_depth);
+        }
+    }
+}
+
+/// Write `value` at `key`.
+///
+/// Outside an array this overwrites, preserving the previous behaviour.  Inside one,
+/// several elements share a field name, so values accumulate into a single separated
+/// string — always a string, never a bare number, so the field keeps one type across
+/// every document (see `flatten_value_into_gelf`).  Repeats are dropped: the same value
+/// twice in an array carries nothing and only inflates the message.
+fn insert_or_append(gelf: &mut Map<String, Value>, key: &str, value: Value, array_depth: usize) {
+    if array_depth == 0 {
+        gelf.insert(key.to_string(), value);
+        return;
+    }
+    let text = match &value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    match gelf.get_mut(key) {
+        Some(Value::String(existing)) => {
+            let separator = separator_for_depth(array_depth);
+            if !existing.split(separator).any(|part| part == text) {
+                existing.push_str(separator);
+                existing.push_str(&text);
+            }
+        }
+        Some(slot) => {
+            *slot = Value::String(text);
+        }
+        None => {
+            gelf.insert(key.to_string(), Value::String(text));
         }
     }
 }
@@ -334,15 +462,54 @@ fn flatten_value_into_gelf(value: &Value, prefix: &str, gelf: &mut Map<String, V
 /// Each key in `map` is appended to `prefix` (separated by `_`) to form the GELF field name,
 /// then delegated to `flatten_value_into_gelf` for further recursion.
 /// `@`-prefixed OData annotation keys are skipped at every level.
-fn flatten_object_into_gelf(map: &Map<String, Value>, prefix: &str, gelf: &mut Map<String, Value>) {
+fn flatten_object_into_gelf(
+    map: &Map<String, Value>,
+    prefix: &str,
+    gelf: &mut Map<String, Value>,
+    array_depth: usize,
+) {
     for (key, value) in map {
-        // Skip OData type annotations – they are meta-data noise.
-        if key.starts_with('@') {
+        // Skip OData annotations – they are metadata noise, and `@` is not a legal
+        // character in a GELF additional field name.  Graph emits them both as
+        // standalone keys (`@odata.context`) and as suffixes on the property they
+        // annotate (`RecordType@odata.type`), so a `starts_with` check is not enough.
+        if is_odata_annotation(key) {
             continue;
         }
-        let field_name = format!("{}_{}", prefix, key);
-        flatten_value_into_gelf(value, &field_name, gelf);
+        let field_name = format!("{}_{}", prefix, sanitize_field_segment(key));
+        flatten_value_into_gelf(value, &field_name, gelf, array_depth);
     }
+}
+
+/// True for OData annotation keys, which carry no audit data of their own:
+/// `@odata.context`, `@odata.type`, `RecordType@odata.type`, …
+fn is_odata_annotation(key: &str) -> bool {
+    key.starts_with('@') || key.contains("@odata")
+}
+
+/// Coerce one field-name segment into something Graylog and OpenSearch can index.
+///
+/// GELF restricts additional field names to `[\w.-]`, and Graylog silently discards
+/// fields that violate it — so names carrying spaces (`Included Updated Properties`,
+/// promoted out of ModifiedProperties) never arrive at all.  Dots are legal GELF but
+/// make OpenSearch build an object mapping for the part before the dot, which hard
+/// -conflicts the moment that same name arrives as a scalar, so they are folded to
+/// `_` as well.  Every run of illegal characters collapses into a single `_`.
+fn sanitize_field_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    let mut pending_sep = false;
+    for ch in segment.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            if pending_sep && !out.is_empty() {
+                out.push('_');
+            }
+            pending_sep = false;
+            out.push(ch);
+        } else {
+            pending_sep = true;
+        }
+    }
+    out
 }
 
 /// Build a GELF 1.1 message from an audit log entry.
@@ -356,7 +523,175 @@ fn flatten_object_into_gelf(map: &Map<String, Value>, prefix: &str, gelf: &mut M
 /// All other audit log fields are included as GELF additional fields, prefixed with `_`.
 /// When received by a `GELF UDP` or `GELF TCP` Graylog input these become first-class message fields,
 /// removing the need for a JSON extractor.
+/// Produce one variant of `value` for each element of the array named `key`, wherever that
+/// array sits in the tree.  Each variant keeps its element's full parent context, so an item
+/// taken from `Folders[1].FolderItems[3]` still carries folder 1's path and metadata.
+///
+/// Returns `None` when `key` is absent, so the caller can try the next candidate.
+fn split_value_on_key(value: &Value, key: &str) -> Option<Vec<Value>> {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Array(items)) = map.get(key) {
+                if items.is_empty() {
+                    return None;
+                }
+                return Some(
+                    items
+                        .iter()
+                        .map(|item| {
+                            let mut one = map.clone();
+                            one.insert(key.to_string(), Value::Array(vec![item.clone()]));
+                            Value::Object(one)
+                        })
+                        .collect(),
+                );
+            }
+            // `Map` is ordered, so which branch matches does not vary between runs.
+            for (child_key, child) in map {
+                if let Some(variants) = split_value_on_key(child, key) {
+                    return Some(
+                        variants
+                            .into_iter()
+                            .map(|variant| {
+                                let mut one = map.clone();
+                                one.insert(child_key.clone(), variant);
+                                Value::Object(one)
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            None
+        }
+        Value::Array(items) => {
+            // Elements that do not contain the key are carried through untouched rather than
+            // dropped: a record with one folder holding three items and another holding none
+            // must still account for both folders.
+            let mut variants = Vec::new();
+            let mut found = false;
+            for item in items {
+                match split_value_on_key(item, key) {
+                    Some(inner) => {
+                        found = true;
+                        variants.extend(inner.into_iter().map(|v| Value::Array(vec![v])));
+                    }
+                    None => variants.push(Value::Array(vec![item.clone()])),
+                }
+            }
+            if found {
+                Some(variants)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Split one audit record into per-item records, using the first of `split_keys` that yields
+/// more than one element.
+fn split_log(log: &ArbitraryJson, split_keys: &[String]) -> Option<Vec<ArbitraryJson>> {
+    // `ArbitraryJson` is a `HashMap`; sort so the same record always splits the same way.
+    let mut field_names: Vec<&String> = log.keys().collect();
+    field_names.sort();
+
+    for key in split_keys {
+        for field in &field_names {
+            let variants = match split_value_on_key(&log[*field], key) {
+                Some(v) if v.len() > 1 => v,
+                _ => continue,
+            };
+            return Some(
+                variants
+                    .into_iter()
+                    .map(|variant| {
+                        let mut one = log.clone();
+                        one.insert((*field).clone(), variant);
+                        one
+                    })
+                    .collect(),
+            );
+        }
+    }
+    None
+}
+
+/// Build the GELF messages for one audit record.
+///
+/// A record describing several items -- `MailItemsAccessed` reports up to a dozen mails in a
+/// single record -- becomes one message per item.  Collapsing them into shared fields would
+/// otherwise lose which subject belonged to which message id, and deduplication would make
+/// the item count unrecoverable.  `_ItemIndex` / `_ItemCount` mark each message's place, so a
+/// bulk delete is still one query (`_ItemCount:>50`) without an aggregation.
+pub fn build_gelf_messages(
+    log: &ArbitraryJson,
+    host: &str,
+    split_keys: &[String],
+    string_fields: &[String],
+) -> Result<Vec<String>, std::io::Error> {
+    let variants = match split_log(log, split_keys) {
+        Some(v) => v,
+        None => {
+            let mut gelf = build_gelf_map(log, host)?;
+            coerce_string_fields(&mut gelf, string_fields);
+            return Ok(vec![serialize_gelf(&gelf)?]);
+        }
+    };
+
+    let total = variants.len();
+    let mut out = Vec::with_capacity(total);
+    for (index, variant) in variants.iter().enumerate() {
+        let mut gelf = build_gelf_map(variant, host)?;
+        coerce_string_fields(&mut gelf, string_fields);
+        gelf.insert("_ItemIndex".to_string(), Value::Number(index.into()));
+        gelf.insert("_ItemCount".to_string(), Value::Number(total.into()));
+        out.push(serialize_gelf(&gelf)?);
+    }
+    Ok(out)
+}
+
+/// Build a single GELF message, applying the default string-field coercion. Production
+/// always goes through `build_gelf_messages`, which may emit several; this is the
+/// single-message form the tests assert against.
+#[cfg(test)]
 pub fn build_gelf_message(log: &ArbitraryJson, host: &str) -> Result<String, std::io::Error> {
+    let mut gelf = build_gelf_map(log, host)?;
+    let defaults: Vec<String> = DEFAULT_STRING_FIELDS.iter().map(|s| s.to_string()).collect();
+    coerce_string_fields(&mut gelf, &defaults);
+    serialize_gelf(&gelf)
+}
+
+/// Force the named fields to text, whatever type the API sent.
+///
+/// Office 365 changes a field's type between record types -- `ListBaseType` is `1` on a
+/// `FileAccessed` record and `"DocumentLibrary"` on a `ListViewed` one.  OpenSearch maps
+/// the field from whichever document reaches it first and then rejects every document
+/// carrying the other form, losing those records entirely; a scan of 2422 live records
+/// found 320 numeric and 13 string occurrences of exactly this field.  Emitting it as text
+/// consistently costs only range queries on what is an enum anyway.
+///
+/// Matching is on the field name's last segment, so a field is covered wherever it sits.
+fn coerce_string_fields(gelf: &mut Map<String, Value>, string_fields: &[String]) {
+    if string_fields.is_empty() {
+        return;
+    }
+    for (key, value) in gelf.iter_mut() {
+        if value.is_string() {
+            continue;
+        }
+        let leaf = key.rsplit('_').next().unwrap_or(key.as_str());
+        if string_fields.iter().any(|f| f == leaf) {
+            *value = Value::String(value.to_string());
+        }
+    }
+}
+
+fn serialize_gelf(gelf: &Map<String, Value>) -> Result<String, std::io::Error> {
+    serde_json::to_string(gelf)
+        .map_err(|e| std::io::Error::new(ErrorKind::Other, format!("Could not serialize GELF message: {}", e)))
+}
+
+fn build_gelf_map(log: &ArbitraryJson, host: &str) -> Result<Map<String, Value>, std::io::Error> {
 
     let creation_time = log.get("CreationTime")
         .and_then(|v| v.as_str())
@@ -383,36 +718,47 @@ pub fn build_gelf_message(log: &ArbitraryJson, host: &str) -> Result<String, std
             .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "Could not encode timestamp as JSON number"))?
     ));
 
-    for (key, value) in log {
+    // Pass 1: the record envelope.  Sorted so that field-name collisions resolve the same
+    // way on every run — `ArbitraryJson` is a `HashMap`, whose iteration order is random.
+    let mut envelope_keys: Vec<&String> = log
+        .keys()
         // The GELF spec reserves `_id`; skip it to avoid conflicts with Graylog's internal id.
-        if key == "id" {
+        .filter(|k| k.as_str() != "id" && k.as_str() != "auditData")
+        .collect();
+    envelope_keys.sort();
+    for key in envelope_keys {
+        // Recursively flatten every field.  This handles Office Management API records whose
+        // top-level values may be nested objects, arrays of objects (e.g. `Parameters`,
+        // `ExtendedProperties`, `Actor`, `Folders`), strings that embed JSON objects/arrays,
+        // booleans, numbers, and nulls.  Null values are omitted; booleans are coerced to
+        // their string representation; scalars are kept as-is; objects and arrays are
+        // expanded with `_` / 0-based-index suffixes recursively so every leaf value becomes
+        // its own searchable GELF field.
+        if is_odata_annotation(key) {
             continue;
         }
-        // UALGraph records carry a nested `auditData` JSON object that contains the most
-        // useful audit fields (ClientIP, Operation, UserId, ObjectId, …).  Serialising the
-        // whole object as a single escaped JSON string makes those fields un-searchable in
-        // Graylog.  Recursively flatten the object into individual `_auditData_<field>`
-        // GELF fields so that even deeply-nested sub-objects (e.g. AppAccessContext) become
-        // individual searchable fields.
-        if key == "auditData" {
-            if let Value::Object(map) = value {
-                flatten_object_into_gelf(map, "_auditData", &mut gelf);
-            }
-            continue;
-        }
-        // Recursively flatten all remaining fields.  This handles Office Management API
-        // records whose top-level values may be nested objects, arrays of objects (e.g.
-        // `Parameters`, `ExtendedProperties`, `Actor`, `Folders`), strings that embed JSON
-        // objects/arrays, booleans, numbers, and nulls.  Null values are omitted; booleans
-        // are coerced to their string representation; scalars are kept as-is; objects and
-        // arrays are expanded with `_` / 0-based-index suffixes recursively so every leaf
-        // value becomes its own searchable GELF field.
-        let gelf_key = format!("_{}", key);
-        flatten_value_into_gelf(value, &gelf_key, &mut gelf);
+        let gelf_key = format!("_{}", sanitize_field_segment(key));
+        flatten_value_into_gelf(&log[key], &gelf_key, &mut gelf, 0);
     }
 
-    serde_json::to_string(&gelf)
-        .map_err(|e| std::io::Error::new(ErrorKind::Other, format!("Could not serialize GELF message: {}", e)))
+    // Pass 2: UALGraph records wrap the whole audit payload in a nested `auditData` object
+    // (ClientIP, Operation, UserId, ObjectId, ApplicationDisplayName, …).  Flatten it to the
+    // top level rather than under an `_auditData` prefix, so that a Graph UAL record and a
+    // Management API record describing the same event expose the same field names and one
+    // Graylog dashboard works across both inputs.
+    //
+    // The envelope wins any collision: it carries the normalised `CreationTime`
+    // (`2026-09-22T11:18:13`, which Graylog parses) where `auditData` repeats it in Zulu
+    // form, and its `Id` is the record id rather than a nested object's.
+    if let Some(Value::Object(map)) = log.get("auditData") {
+        let mut nested: Map<String, Value> = Map::new();
+        flatten_object_into_gelf(map, "", &mut nested, 0);
+        for (key, value) in nested {
+            gelf.entry(key).or_insert(value);
+        }
+    }
+
+    Ok(gelf)
 }
 
 #[cfg(test)]
@@ -569,20 +915,20 @@ mod tests {
         // The raw _auditData blob must NOT appear
         assert!(parsed.get("_auditData").is_none(), "_auditData must be flattened, not serialized as a string");
         // Scalar fields are promoted to top-level GELF fields
-        assert_eq!(parsed["_auditData_ClientIP"], "4.210.128.168", "_auditData_ClientIP must be a string");
-        assert_eq!(parsed["_auditData_Operation"], "FileAccessedExtended", "_auditData_Operation must be a string");
-        assert!(parsed["_auditData_RecordType"].is_number(), "_auditData_RecordType must be a number");
+        assert_eq!(parsed["_ClientIP"], "4.210.128.168", "_ClientIP must be a string");
+        assert_eq!(parsed["_Operation"], "FileAccessedExtended", "_Operation must be a string");
+        assert!(parsed["_RecordType"].is_number(), "_RecordType must be a number");
         // Nested objects are recursively flattened
-        assert_eq!(parsed["_auditData_AppAccessContext_AADSessionId"], "abc",
-            "_auditData_AppAccessContext_AADSessionId must be flattened from the nested object");
-        assert_eq!(parsed["_auditData_AppAccessContext_ClientAppName"], "App Service",
-            "_auditData_AppAccessContext_ClientAppName must be flattened from the nested object");
-        assert!(parsed.get("_auditData_AppAccessContext").is_none(),
-            "_auditData_AppAccessContext must not appear as a raw string after flattening");
+        assert_eq!(parsed["_AppAccessContext_AADSessionId"], "abc",
+            "_AppAccessContext_AADSessionId must be flattened from the nested object");
+        assert_eq!(parsed["_AppAccessContext_ClientAppName"], "App Service",
+            "_AppAccessContext_ClientAppName must be flattened from the nested object");
+        assert!(parsed.get("_AppAccessContext").is_none(),
+            "_AppAccessContext must not appear as a raw string after flattening");
         // odata type annotations are dropped
-        assert!(parsed.get("_auditData_@odata.type").is_none(), "odata type annotations must be omitted");
+        assert!(parsed.get("_@odata.type").is_none(), "odata type annotations must be omitted");
         // Null sub-fields are omitted
-        assert!(parsed.get("_auditData_NullField").is_none(), "null auditData fields must be omitted");
+        assert!(parsed.get("_NullField").is_none(), "null auditData fields must be omitted");
     }
 
     #[test]
@@ -598,14 +944,14 @@ mod tests {
         let json_str = build_gelf_message(&log, "myhost").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         // The string-encoded object must be parsed and its fields promoted
-        assert_eq!(parsed["_auditData_AppAccessContext_AADSessionId"], "004db2b9-de97-c009-44f9-214e4f43b48d");
-        assert_eq!(parsed["_auditData_AppAccessContext_ClientAppName"], "rclone");
+        assert_eq!(parsed["_AppAccessContext_AADSessionId"], "004db2b9-de97-c009-44f9-214e4f43b48d");
+        assert_eq!(parsed["_AppAccessContext_ClientAppName"], "rclone");
         // OData annotation inside the string-encoded object must also be dropped
-        assert!(parsed.get("_auditData_AppAccessContext_@odata.type").is_none(),
+        assert!(parsed.get("_AppAccessContext_@odata.type").is_none(),
             "odata annotations inside string-encoded nested objects must be omitted");
         // The raw string field must not appear
-        assert!(parsed.get("_auditData_AppAccessContext").is_none(),
-            "_auditData_AppAccessContext must not appear as a raw string");
+        assert!(parsed.get("_AppAccessContext").is_none(),
+            "_AppAccessContext must not appear as a raw string");
     }
 
     #[test]
@@ -619,7 +965,9 @@ mod tests {
     #[test]
     fn gelf_message_flattens_audit_data_array() {
         // auditData may contain array-valued fields whose elements are objects.
-        // Each element must be expanded with a 0-based index suffix.
+        // All elements collapse onto one field name per leaf property, accumulating into a
+        // multi-value field; a positional suffix would mint a new field name per array
+        // length and grow the OpenSearch mapping without bound.
         let mut log = make_log("FolderBind", "2026-04-25T05:33:44");
         log.insert("auditData".to_string(), serde_json::json!({
             "ClientIP": "1.2.3.4",
@@ -640,16 +988,26 @@ mod tests {
         let json_str = build_gelf_message(&log, "myhost").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         // Raw array field must not appear
-        assert!(parsed.get("_auditData_Folders").is_none(),
-            "_auditData_Folders must be flattened, not stored as an array string");
-        // First folder scalar
-        assert_eq!(parsed["_auditData_Folders_0_Id"], "folder-001");
-        // Nested array inside first folder
-        assert_eq!(parsed["_auditData_Folders_0_FolderItems_0_Id"], "item-001");
-        assert_eq!(parsed["_auditData_Folders_0_FolderItems_0_CreationTime"], "2026-04-25T05:33:44Z");
-        assert_eq!(parsed["_auditData_Folders_0_FolderItems_1_Id"], "item-002");
-        // Second folder scalar
-        assert_eq!(parsed["_auditData_Folders_1_Id"], "folder-002");
+        assert!(parsed.get("_Folders").is_none(),
+            "_Folders must be flattened, not stored as an array string");
+        // Both folders' ids accumulate into one multi-value field, in order.
+        assert_eq!(parsed["_Folders_Id"], "folder-001; folder-002");
+        // Nested arrays collapse the same way, across both levels of nesting.
+        // depth 2: the inner separator, so element boundaries stay distinguishable
+        assert_eq!(parsed["_Folders_FolderItems_Id"], "item-001, item-002");
+        assert_eq!(parsed["_Folders_FolderItems_CreationTime"],
+            "2026-04-25T05:33:44Z, 2026-04-25T05:33:45Z");
+        // Collapsing loses which item sat in which folder; the raw array keeps it. Only the
+        // outermost array gets a companion -- the nested one is already inside it.
+        let raw = parsed["_Folders_json"].as_str().expect("_Folders_json must be present");
+        assert!(raw.contains("item-002") && raw.contains("folder-002"));
+        assert!(parsed.get("_Folders_FolderItems_json").is_none(),
+            "nested arrays must not each get their own companion");
+        // No positional field name may survive.
+        for k in parsed.as_object().unwrap().keys() {
+            assert!(!k.split('_').any(|p| p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty()),
+                "positional field name leaked: {}", k);
+        }
     }
 
     #[test]
@@ -664,10 +1022,10 @@ mod tests {
         let json_str = build_gelf_message(&log, "myhost").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         // Raw string field must not appear
-        assert!(parsed.get("_auditData_Folders").is_none(),
-            "_auditData_Folders must not appear as a raw string");
-        assert_eq!(parsed["_auditData_Folders_0_Id"], "folder-str-001");
-        assert_eq!(parsed["_auditData_Folders_0_FolderItems_0_Id"], "item-str-001");
+        assert!(parsed.get("_Folders").is_none(),
+            "_Folders must not appear as a raw string");
+        assert_eq!(parsed["_Folders_Id"], "folder-str-001");
+        assert_eq!(parsed["_Folders_FolderItems_Id"], "item-str-001");
     }
 
     #[test]
@@ -691,5 +1049,324 @@ mod tests {
         // Total data across both chunks must equal the original payload length.
         assert_eq!((n1 - 12) + (n2 - 12), payload.len());
     }
-}
 
+    /// Graph UAL records wrap the payload in `auditData`; Management API records carry the
+    /// same fields at the top level. Both must produce the same GELF field names so a single
+    /// Graylog dashboard works across the two inputs.
+    #[test]
+    fn gelf_message_promotes_audit_data_to_top_level() {
+        let mut log = make_log("FileAccessed", "2026-09-22T11:18:13");
+        log.insert("auditData".to_string(), serde_json::json!({
+            "ApplicationDisplayName": "OneDrive SyncEngine",
+            "ClientIP": "1.2.3.4",
+            "AppAccessContext": {"ClientAppName": "rclone"},
+        }));
+        let parsed: Value = serde_json::from_str(
+            &build_gelf_message(&log, "h").unwrap()).unwrap();
+
+        assert_eq!(parsed["_ApplicationDisplayName"], "OneDrive SyncEngine");
+        assert_eq!(parsed["_ClientIP"], "1.2.3.4");
+        assert_eq!(parsed["_AppAccessContext_ClientAppName"], "rclone");
+        assert!(parsed.get("_auditData_ApplicationDisplayName").is_none(),
+            "the auditData prefix must not survive");
+    }
+
+    /// The envelope carries the normalised CreationTime that Graylog can parse; auditData
+    /// repeats it in Zulu form. The envelope must win, deterministically.
+    #[test]
+    fn gelf_message_envelope_wins_collision_with_audit_data() {
+        let mut log = make_log("FileAccessed", "2026-09-22T11:18:13");
+        log.insert("auditData".to_string(), serde_json::json!({
+            "CreationTime": "2026-09-22T11:18:13Z",
+            "UserId": "other@example.com",
+        }));
+        for _ in 0..20 {
+            let parsed: Value = serde_json::from_str(
+                &build_gelf_message(&log, "h").unwrap()).unwrap();
+            assert_eq!(parsed["_CreationTime"], "2026-09-22T11:18:13");
+            assert_eq!(parsed["_UserId"], "user@example.com");
+        }
+    }
+
+    /// Graph emits OData annotations as suffixes (`RecordType@odata.type`), not just as
+    /// standalone `@`-prefixed keys. `@` is illegal in a GELF field name, so Graylog discards
+    /// these; they are type metadata and carry no audit data.
+    #[test]
+    fn gelf_message_drops_odata_annotation_suffixes() {
+        let mut log = make_log("FileAccessed", "2026-09-22T11:18:13");
+        log.insert("auditData".to_string(), serde_json::json!({
+            "RecordType": 6,
+            "RecordType@odata.type": "#Int32",
+            "ListBaseType@odata.type": "#Int32",
+            "@odata.context": "https://graph.microsoft.com/beta/$metadata",
+        }));
+        let parsed: Value = serde_json::from_str(
+            &build_gelf_message(&log, "h").unwrap()).unwrap();
+
+        assert_eq!(parsed["_RecordType"], 6);
+        for k in parsed.as_object().unwrap().keys() {
+            assert!(!k.contains('@'), "no field name may contain '@': {}", k);
+        }
+    }
+
+    /// GELF restricts additional field names to `[\w.-]`, and OpenSearch treats a dot as an
+    /// object separator. Names promoted out of ModifiedProperties contain both spaces and
+    /// dots, so every segment is folded to `[A-Za-z0-9_]`.
+    #[test]
+    fn gelf_message_sanitizes_illegal_field_name_characters() {
+        let mut log = make_log("Update group.", "2026-09-22T11:18:13");
+        log.insert("ModifiedProperties".to_string(), serde_json::json!([
+            {"Name": "Included Updated Properties", "NewValue": "DisplayName"},
+            {"Name": "Group.DisplayName", "NewValue": "Sales"},
+        ]));
+        let parsed: Value = serde_json::from_str(
+            &build_gelf_message(&log, "h").unwrap()).unwrap();
+
+        assert_eq!(parsed["_Included_Updated_Properties_NewValue"], "DisplayName");
+        assert_eq!(parsed["_Group_DisplayName_NewValue"], "Sales");
+        for k in parsed.as_object().unwrap().keys() {
+            assert!(k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                "illegal character in field name: {}", k);
+        }
+    }
+
+    /// One malformed entry used to demote the whole array to positional names, turning
+    /// `ApplicationDisplayName` from a field into a *value* and hiding it from aggregations.
+    #[test]
+    fn gelf_message_promotes_named_entries_despite_unnamed_siblings() {
+        let mut log = make_log("FileAccessed", "2026-09-22T11:18:13");
+        log.insert("ExtendedProperties".to_string(), serde_json::json!([
+            {"Name": "ApplicationDisplayName", "Value": "Browser"},
+            {"Value": "entry with no name"},
+        ]));
+        let parsed: Value = serde_json::from_str(
+            &build_gelf_message(&log, "h").unwrap()).unwrap();
+
+        assert_eq!(parsed["_ApplicationDisplayName"], "Browser");
+        assert_eq!(parsed["_ExtendedProperties_Value"], "entry with no name");
+    }
+
+    /// An entry with a `Name` but no `Value`/`OldValue`/`NewValue` is an ordinary object
+    /// (e.g. AffectedItems), not a key/value pair. Treating it as one would drop its contents.
+    #[test]
+    fn gelf_message_keeps_objects_that_have_a_name_but_no_value() {
+        let mut log = make_log("HardDelete", "2026-09-22T11:18:13");
+        log.insert("AffectedItems".to_string(), serde_json::json!([
+            {"Name": "report.xlsx", "Id": "item-001", "ParentFolder": "Inbox"},
+        ]));
+        let parsed: Value = serde_json::from_str(
+            &build_gelf_message(&log, "h").unwrap()).unwrap();
+
+        assert_eq!(parsed["_AffectedItems_Name"], "report.xlsx");
+        assert_eq!(parsed["_AffectedItems_Id"], "item-001");
+        assert_eq!(parsed["_AffectedItems_ParentFolder"], "Inbox");
+    }
+
+    /// Collapsed arrays accumulate: one value stays scalar, distinct values become a
+    /// multi-value field, and repeats are dropped rather than inflating the message.
+    #[test]
+    fn gelf_message_accumulates_collapsed_array_values() {
+        let mut log = make_log("FileAccessed", "2026-09-22T11:18:13");
+        log.insert("Actor".to_string(), serde_json::json!([
+            {"ID": "alice@example.com", "Type": 5},
+            {"ID": "bob@example.com",   "Type": 5},
+            {"ID": "alice@example.com", "Type": 0},
+        ]));
+        log.insert("Target".to_string(), serde_json::json!([{"ID": "only-one"}]));
+        let parsed: Value = serde_json::from_str(
+            &build_gelf_message(&log, "h").unwrap()).unwrap();
+
+        // distinct values accumulate in order, duplicates collapse
+        assert_eq!(parsed["_Actor_ID"], "alice@example.com; bob@example.com");
+        // Numbers from inside an array are written as text even when they collapse to one
+        // value, so the field cannot flip between long and keyword across documents.
+        assert_eq!(parsed["_Actor_Type"], "5; 0");
+        assert_eq!(parsed["_Target_ID"], "only-one");
+        assert!(parsed["_Target_ID"].is_string(), "single-element arrays are still text");
+        // The original array is preserved verbatim so the element pairing is not lost.
+        assert!(parsed["_Actor_json"].as_str().unwrap().contains("bob@example.com"));
+        // ...but only where something actually collapsed and there was more than one element.
+        assert!(parsed.get("_Target_json").is_none(),
+            "a single-element array has no ordering worth preserving");
+    }
+
+    /// A bulk delete is what ransomware looks like in an audit feed, so the number of
+    /// elements must survive collapsing. It cannot be recovered from the collapsed fields:
+    /// identical values are deduplicated, and nested arrays must report the total across
+    /// every parent rather than just the last one.
+    #[test]
+    fn gelf_message_records_collapsed_array_element_counts() {
+        let mut log = make_log("HardDelete", "2026-09-22T11:18:13");
+        log.insert("auditData".to_string(), serde_json::json!({
+            "Folders": [
+                {"Id": "f1", "FolderItems": [
+                    {"Subject": "dup"}, {"Subject": "dup"}, {"Subject": "other"}]},
+                {"Id": "f2", "FolderItems": [{"Subject": "third"}]},
+            ]
+        }));
+        let parsed: Value = serde_json::from_str(
+            &build_gelf_message(&log, "h").unwrap()).unwrap();
+
+        // Four items across two folders, even though only three subjects are distinct.
+        assert_eq!(parsed["_Folders_count"], 2);
+        assert_eq!(parsed["_Folders_FolderItems_count"], 4);
+        assert_eq!(parsed["_Folders_FolderItems_Subject"], "dup, other, third");
+        // Counts stay numeric so `_count:>100` can be alerted on.
+        assert!(parsed["_Folders_FolderItems_count"].is_number());
+    }
+
+    fn split_keys() -> Vec<String> {
+        DEFAULT_SPLIT_ARRAYS.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn string_fields() -> Vec<String> {
+        DEFAULT_STRING_FIELDS.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn parse_all(msgs: Vec<String>) -> Vec<Value> {
+        msgs.iter().map(|m| serde_json::from_str(m).unwrap()).collect()
+    }
+
+    /// A Bind record reports many mails in one audit record. One message per mail keeps the
+    /// subject with its own message id, which collapsing cannot do.
+    #[test]
+    fn gelf_splits_mail_items_into_one_message_per_item() {
+        let mut log = make_log("MailItemsAccessed", "2026-09-22T11:18:13");
+        log.insert("auditData".to_string(), serde_json::json!({
+            "MailAccessType": "Bind",
+            "ClientIP": "1.2.3.4",
+            "Folders": [{
+                "Path": "\\Inbox",
+                "FolderItems": [
+                    {"Subject": "first",  "InternetMessageId": "<a@x>"},
+                    {"Subject": "second", "InternetMessageId": "<b@x>"},
+                    {"Subject": "third",  "InternetMessageId": "<c@x>"},
+                ]
+            }]
+        }));
+        let msgs = parse_all(build_gelf_messages(&log, "h", &split_keys(), &string_fields()).unwrap());
+
+        assert_eq!(msgs.len(), 3, "one message per mail item");
+        for (i, m) in msgs.iter().enumerate() {
+            assert_eq!(m["_ItemIndex"], i);
+            assert_eq!(m["_ItemCount"], 3);
+            // the record-level context is repeated on every message
+            assert_eq!(m["_ClientIP"], "1.2.3.4");
+            assert_eq!(m["_Folders_Path"], "\\Inbox");
+        }
+        // each subject stays paired with its own message id
+        assert_eq!(msgs[0]["_Folders_FolderItems_Subject"], "first");
+        assert_eq!(msgs[0]["_Folders_FolderItems_InternetMessageId"], "<a@x>");
+        assert_eq!(msgs[2]["_Folders_FolderItems_Subject"], "third");
+        assert_eq!(msgs[2]["_Folders_FolderItems_InternetMessageId"], "<c@x>");
+    }
+
+    /// A Sync record has no FolderItems at all -- Outlook pulled whole folders down, so no
+    /// per-message ids exist. Splitting must fall through to one message per folder instead
+    /// of silently emitting a single message that hides how much was synchronised.
+    #[test]
+    fn gelf_splits_sync_records_per_folder() {
+        let mut log = make_log("MailItemsAccessed", "2026-09-22T11:18:13");
+        log.insert("auditData".to_string(), serde_json::json!({
+            "MailAccessType": "Sync",
+            "Folders": [{"Path": "\\Inbox"}, {"Path": "\\Sent Items"}]
+        }));
+        let msgs = parse_all(build_gelf_messages(&log, "h", &split_keys(), &string_fields()).unwrap());
+
+        assert_eq!(msgs.len(), 2, "one message per synchronised folder");
+        assert_eq!(msgs[0]["_Folders_Path"], "\\Inbox");
+        assert_eq!(msgs[1]["_Folders_Path"], "\\Sent Items");
+        for m in &msgs {
+            assert_eq!(m["_MailAccessType"], "Sync");
+            assert!(m.get("_Folders_FolderItems_InternetMessageId").is_none(),
+                "a Sync carries no per-message ids");
+        }
+    }
+
+    /// Items spread across several folders must all survive, each keeping its own folder.
+    #[test]
+    fn gelf_splits_items_across_multiple_folders() {
+        let mut log = make_log("MailItemsAccessed", "2026-09-22T11:18:13");
+        log.insert("auditData".to_string(), serde_json::json!({
+            "Folders": [
+                {"Path": "\\Inbox", "FolderItems": [{"Subject": "a"}, {"Subject": "b"}]},
+                {"Path": "\\Archive", "FolderItems": [{"Subject": "c"}]},
+            ]
+        }));
+        let msgs = parse_all(build_gelf_messages(&log, "h", &split_keys(), &string_fields()).unwrap());
+
+        assert_eq!(msgs.len(), 3, "a folder holding a single item must not be dropped");
+        let pairs: Vec<(String, String)> = msgs.iter().map(|m| (
+            m["_Folders_Path"].as_str().unwrap().to_string(),
+            m["_Folders_FolderItems_Subject"].as_str().unwrap().to_string(),
+        )).collect();
+        assert!(pairs.contains(&("\\Inbox".into(), "a".into())));
+        assert!(pairs.contains(&("\\Inbox".into(), "b".into())));
+        assert!(pairs.contains(&("\\Archive".into(), "c".into())));
+    }
+
+    /// Records with nothing to split stay exactly one message.
+    #[test]
+    fn gelf_does_not_split_records_without_item_arrays() {
+        let mut log = make_log("FileAccessed", "2026-09-22T11:18:13");
+        log.insert("auditData".to_string(),
+            serde_json::json!({"ApplicationDisplayName": "Browser"}));
+        let msgs = build_gelf_messages(&log, "h", &split_keys(), &string_fields()).unwrap();
+
+        assert_eq!(msgs.len(), 1);
+        let m: Value = serde_json::from_str(&msgs[0]).unwrap();
+        assert_eq!(m["_ApplicationDisplayName"], "Browser");
+        assert!(m.get("_ItemIndex").is_none(), "no split, no item markers");
+    }
+
+    /// A one-item array is not worth splitting, and must not be.
+    #[test]
+    fn gelf_does_not_split_single_element_arrays() {
+        let mut log = make_log("HardDelete", "2026-09-22T11:18:13");
+        log.insert("auditData".to_string(), serde_json::json!({
+            "AffectedItems": [{"Subject": "only-one"}]
+        }));
+        let msgs = build_gelf_messages(&log, "h", &split_keys(), &string_fields()).unwrap();
+        assert_eq!(msgs.len(), 1);
+    }
+
+    /// Office 365 sends ListBaseType as a number on FileAccessed and as text on ListViewed.
+    /// OpenSearch maps the field from whichever arrives first and rejects the rest, so the
+    /// collector must pick one type and stick to it.
+    #[test]
+    fn gelf_coerces_inconsistently_typed_fields_to_text() {
+        let mut numeric = make_log("FileAccessed", "2026-09-22T11:18:13");
+        numeric.insert("auditData".to_string(),
+            serde_json::json!({"ListBaseType": 1, "ItemCount": 7}));
+        let a: Value = serde_json::from_str(&build_gelf_message(&numeric, "h").unwrap()).unwrap();
+
+        let mut textual = make_log("ListViewed", "2026-09-22T11:18:13");
+        textual.insert("auditData".to_string(),
+            serde_json::json!({"ListBaseType": "DocumentLibrary"}));
+        let b: Value = serde_json::from_str(&build_gelf_message(&textual, "h").unwrap()).unwrap();
+
+        assert_eq!(a["_ListBaseType"], "1", "the numeric form must be emitted as text");
+        assert_eq!(b["_ListBaseType"], "DocumentLibrary");
+        assert!(a["_ListBaseType"].is_string() && b["_ListBaseType"].is_string(),
+            "both record types must agree on the field's type");
+        // Fields not on the list keep their natural type, so ranges still work.
+        assert!(a["_ItemCount"].is_number());
+    }
+
+    /// An empty list disables coercion; an explicit list replaces the default.
+    #[test]
+    fn gelf_string_field_coercion_is_configurable() {
+        let mut log = make_log("FileAccessed", "2026-09-22T11:18:13");
+        log.insert("auditData".to_string(), serde_json::json!({"ListBaseType": 1, "Version": 2}));
+
+        let none: Value = serde_json::from_str(
+            &build_gelf_messages(&log, "h", &split_keys(), &[]).unwrap()[0]).unwrap();
+        assert!(none["_ListBaseType"].is_number(), "empty list leaves types untouched");
+
+        let custom = vec!["Version".to_string()];
+        let v: Value = serde_json::from_str(
+            &build_gelf_messages(&log, "h", &split_keys(), &custom).unwrap()[0]).unwrap();
+        assert_eq!(v["_Version"], "2");
+        assert!(v["_ListBaseType"].is_number(), "not on the custom list");
+    }
+}
