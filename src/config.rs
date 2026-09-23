@@ -379,6 +379,22 @@ pub struct GraylogOutputSubConfig {
     pub format: Option<GraylogFormat>,
     pub host: Option<String>,
     pub protocol: Option<GraylogProtocol>,
+    /// Arrays that are emitted as one GELF message per element instead of being collapsed
+    /// into a single multi-value field.  Tried in order; the first that yields more than one
+    /// element wins.  `Folders` comes last on purpose: a `MailItemsAccessed` record with
+    /// `MailAccessType: Bind` splits per mail item, while a `Sync` record carries no
+    /// `FolderItems` at all and falls through to one message per synchronised folder.
+    #[serde(rename = "splitArrays")]
+    pub split_arrays: Option<Vec<String>>,
+    /// Fields always emitted as text, even when the API sends a number.
+    ///
+    /// Office 365 is not consistent about this: `ListBaseType` arrives as `1` on a
+    /// `FileAccessed` record and as `"DocumentLibrary"` on a `ListViewed` one.  OpenSearch
+    /// maps the field from whichever document it indexes first and then rejects every
+    /// document carrying the other form, so the records are lost outright.  Matching is on
+    /// the last segment of the field name, so the path a field sits at does not matter.
+    #[serde(rename = "stringFields")]
+    pub string_fields: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
