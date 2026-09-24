@@ -343,126 +343,187 @@ impl Collector {
     /// before proceeding to the next window. This ensures that if collection fails partway
     /// through, all previously completed windows have already been saved to the output
     /// interfaces and their IDs recorded in known_blobs.
+    /// Collect every enabled Graph source, flushing each time window as it arrives.
+    ///
+    /// A source that fails is logged and skipped rather than aborting the run. The sources
+    /// are independent and their permissions are granted separately, so one of them lacking
+    /// a scope -- or the tenant not being licensed for it, as with Identity Protection on
+    /// anything below Entra ID P2 -- used to take down every source that came after it. The
+    /// run only fails if nothing at all could be collected.
     async fn collect_and_process_graph_logs(&mut self) -> Result<()> {
         let config = match self.graph_config.take() {
             Some(c) => c,
             None => return Ok(()),
         };
 
+        let mut attempted = 0usize;
+        let mut failed = 0usize;
+
         if config.graph_ual_enabled {
             info!("Retrieving Unified Audit Logs from Microsoft Graph API.");
+            attempted += 1;
             let mut total = 0;
+            let mut source_error: Option<anyhow::Error> = None;
             for run in &config.ual_runs {
-                let logs = config
-                    .connection
-                    .collect_logs(std::slice::from_ref(run), &self.known_blobs, config.skip_known_logs)
-                    .await?;
-                total += logs.len();
-                self.process_and_flush_graph_window_logs(logs).await;
+                match config.connection.collect_logs(std::slice::from_ref(run), &self.known_blobs, config.skip_known_logs).await {
+                    Ok(logs) => {
+                        total += logs.len();
+                        self.process_and_flush_graph_window_logs(logs).await;
+                    }
+                    Err(e) => {
+                        source_error = Some(e);
+                        break;
+                    }
+                }
             }
-            info!("Retrieved {} Unified Audit Logs from Graph API.", total);
+            match source_error {
+                Some(e) => {
+                    failed += 1;
+                    error!("Unified Audit Logs collection failed, continuing with the remaining sources: {}", e);
+                }
+                None => info!("Retrieved {} Unified Audit Logs from Graph API.", total),
+            }
         }
 
         if config.sign_in_enabled {
             info!("Retrieving Entra ID sign-ins from Microsoft Graph API.");
+            attempted += 1;
             let mut total = 0;
+            let mut source_error: Option<anyhow::Error> = None;
             for run in &config.sign_in_runs {
-                let logs = config
-                    .connection
-                    .collect_entra_signin_logs(
-                        std::slice::from_ref(run),
-                        &self.known_blobs,
-                        config.skip_known_logs,
-                    )
-                    .await?;
-                total += logs.len();
-                self.process_and_flush_graph_window_logs(logs).await;
+                match config.connection.collect_entra_signin_logs(std::slice::from_ref(run), &self.known_blobs, config.skip_known_logs).await {
+                    Ok(logs) => {
+                        total += logs.len();
+                        self.process_and_flush_graph_window_logs(logs).await;
+                    }
+                    Err(e) => {
+                        source_error = Some(e);
+                        break;
+                    }
+                }
             }
-            info!("Retrieved {} Entra ID sign-ins from Graph API.", total);
+            match source_error {
+                Some(e) => {
+                    failed += 1;
+                    error!("Entra ID sign-ins collection failed, continuing with the remaining sources: {}", e);
+                }
+                None => info!("Retrieved {} Entra ID sign-ins from Graph API.", total),
+            }
         }
 
         if config.entra_audit_enabled {
             info!("Retrieving Entra ID directory audit logs from Microsoft Graph API.");
+            attempted += 1;
             let mut total = 0;
+            let mut source_error: Option<anyhow::Error> = None;
             for run in &config.entra_audit_runs {
-                let logs = config
-                    .connection
-                    .collect_entra_directory_audit_logs(
-                        std::slice::from_ref(run),
-                        &config.entra_categories,
-                        &self.known_blobs,
-                        config.skip_known_logs,
-                    )
-                    .await?;
-                total += logs.len();
-                self.process_and_flush_graph_window_logs(logs).await;
+                match config.connection.collect_entra_directory_audit_logs(std::slice::from_ref(run), &config.entra_categories, &self.known_blobs, config.skip_known_logs).await {
+                    Ok(logs) => {
+                        total += logs.len();
+                        self.process_and_flush_graph_window_logs(logs).await;
+                    }
+                    Err(e) => {
+                        source_error = Some(e);
+                        break;
+                    }
+                }
             }
-            info!(
-                "Retrieved {} Entra ID directory audit logs from Graph API.",
-                total
-            );
+            match source_error {
+                Some(e) => {
+                    failed += 1;
+                    error!("Entra ID directory audit logs collection failed, continuing with the remaining sources: {}", e);
+                }
+                None => info!("Retrieved {} Entra ID directory audit logs from Graph API.", total),
+            }
         }
 
         if config.exchange_mailbox_enabled {
             info!("Retrieving Exchange Mailbox Audit Logs from Microsoft Graph API.");
+            attempted += 1;
             let mut total = 0;
+            let mut source_error: Option<anyhow::Error> = None;
             for run in &config.exchange_mailbox_runs {
-                let logs = config
-                    .connection
-                    .collect_exchange_mailbox_logs(
-                        std::slice::from_ref(run),
-                        &self.known_blobs,
-                        config.skip_known_logs,
-                    )
-                    .await?;
-                total += logs.len();
-                self.process_and_flush_graph_window_logs(logs).await;
+                match config.connection.collect_exchange_mailbox_logs(std::slice::from_ref(run), &self.known_blobs, config.skip_known_logs).await {
+                    Ok(logs) => {
+                        total += logs.len();
+                        self.process_and_flush_graph_window_logs(logs).await;
+                    }
+                    Err(e) => {
+                        source_error = Some(e);
+                        break;
+                    }
+                }
             }
-            info!(
-                "Retrieved {} Exchange Mailbox Audit Logs from Graph API.",
-                total
-            );
+            match source_error {
+                Some(e) => {
+                    failed += 1;
+                    error!("Exchange Mailbox Audit Logs collection failed, continuing with the remaining sources: {}", e);
+                }
+                None => info!("Retrieved {} Exchange Mailbox Audit Logs from Graph API.", total),
+            }
         }
 
         if config.intune_enabled {
             info!("Retrieving Intune audit logs from Microsoft Graph API.");
+            attempted += 1;
             let mut total = 0;
+            let mut source_error: Option<anyhow::Error> = None;
             for run in &config.intune_runs {
-                let logs = config
-                    .connection
-                    .collect_intune_logs(
-                        std::slice::from_ref(run),
-                        &self.known_blobs,
-                        config.skip_known_logs,
-                    )
-                    .await?;
-                total += logs.len();
-                self.process_and_flush_graph_window_logs(logs).await;
+                match config.connection.collect_intune_logs(std::slice::from_ref(run), &self.known_blobs, config.skip_known_logs).await {
+                    Ok(logs) => {
+                        total += logs.len();
+                        self.process_and_flush_graph_window_logs(logs).await;
+                    }
+                    Err(e) => {
+                        source_error = Some(e);
+                        break;
+                    }
+                }
             }
-            info!("Retrieved {} Intune audit logs from Graph API.", total);
+            match source_error {
+                Some(e) => {
+                    failed += 1;
+                    error!("Intune audit logs collection failed, continuing with the remaining sources: {}", e);
+                }
+                None => info!("Retrieved {} Intune audit logs from Graph API.", total),
+            }
         }
 
         if config.identity_protection_risk_detections_enabled {
             info!("Retrieving Identity Protection Risk Detections from Microsoft Graph API.");
+            attempted += 1;
             let mut total = 0;
+            let mut source_error: Option<anyhow::Error> = None;
             for run in &config.identity_protection_risk_detections_runs {
-                let logs = config
-                    .connection
-                    .collect_identity_protection_risk_detections(
-                        std::slice::from_ref(run),
-                        &self.known_blobs,
-                        config.skip_known_logs,
-                    )
-                    .await?;
-                total += logs.len();
-                self.process_and_flush_graph_window_logs(logs).await;
+                match config.connection.collect_identity_protection_risk_detections(std::slice::from_ref(run), &self.known_blobs, config.skip_known_logs).await {
+                    Ok(logs) => {
+                        total += logs.len();
+                        self.process_and_flush_graph_window_logs(logs).await;
+                    }
+                    Err(e) => {
+                        source_error = Some(e);
+                        break;
+                    }
+                }
             }
-            info!(
-                "Retrieved {} Identity Protection Risk Detection records from Graph API.",
-                total
-            );
+            match source_error {
+                Some(e) => {
+                    failed += 1;
+                    error!("Identity Protection Risk Detections collection failed, continuing with the remaining sources: {}", e);
+                }
+                None => info!("Retrieved {} Identity Protection Risk Detections from Graph API.", total),
+            }
         }
 
+        if attempted > 0 && failed == attempted {
+            anyhow::bail!("all {} enabled Graph sources failed", attempted);
+        }
+        if failed > 0 {
+            warn!(
+                "{} of {} Graph sources failed; the rest were collected normally.",
+                failed, attempted
+            );
+        }
         Ok(())
     }
 

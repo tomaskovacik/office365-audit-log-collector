@@ -117,6 +117,16 @@ See the following link for more info on the management APIs: https://msdn.micros
     - Check `DeviceManagementApps.Read.All` (or `DeviceManagementConfiguration.Read.All`)
     - Hit 'Add permissions'
   - Click "Grant admin consent" for the tenant
+- If you want to enable `Audit.IdentityProtectionRiskDetections`, grant Microsoft Graph application permissions:
+  - Azure AD > 'App registrations' > Click your new app registration > 'API permissions' > 'Add permissions' > 'Microsoft Graph' > 'Application permissions'
+    - Check `IdentityRiskEvent.Read.All`
+    - Hit 'Add permissions'
+  - Click "Grant admin consent" for the tenant
+  - Note: this content type additionally requires **Entra ID P2** on the tenant. Identity
+    Protection is a P2 feature, so without that licence the permission alone is not enough and
+    the API answers `Forbidden: Your tenant is not licensed for this feature.` A missing
+    permission (rather than a missing licence) answers
+    `Forbidden: ... required scopes are missing in the token.` instead.
 - You can now run the collector and retrieve logs. 
 
 
@@ -231,6 +241,30 @@ the `https://graph.microsoft.com/v1.0/deviceManagement/auditEvents` endpoint.
 - A ready example config is available at `Release/ConfigExamples/intune.yaml`.
 
 You can schedule to run the executable with CRON or Task Scheduler.
+
+### Enabling Identity Protection Risk Detections via Microsoft Graph
+
+Risk detections record sign-in and user risk events raised by Entra ID Protection - leaked
+credentials, impossible travel, anonymous IP addresses, malicious IP addresses and similar. This
+collector queries the `https://graph.microsoft.com/v1.0/identityProtection/riskDetections`
+endpoint.
+
+- Set `collect.contentTypes.Audit.IdentityProtectionRiskDetections: True` in your config.
+- Required Microsoft Graph permission: `IdentityRiskEvent.Read.All`.
+- **Requires Entra ID P2.** Identity Protection is a P2 feature, so the permission alone is not
+  sufficient. The two failure modes read differently:
+  - `Forbidden: Your tenant is not licensed for this feature.` - the tenant has no P2 licence.
+  - `Forbidden: ... required scopes are missing in the token.` - the permission is missing, or
+    was added but admin consent was never granted.
+- Records are exported under content type `IdentityProtection.RiskDetections`.
+
+### A note on Graph source failures
+
+The Graph content types are independent of each other and their permissions and licences are
+granted separately. A source that fails - a missing scope, a missing licence, a transient API
+error - is logged and skipped, and the remaining sources are collected normally; the run only
+fails if every enabled source failed. Enabling a source your tenant is not licensed for
+therefore costs you one error line per run rather than the rest of your logs.
 
 ### Setting up the collector for Graylog:
 I wrote a full tutorial on the Graylog blog. You can find it
