@@ -340,6 +340,23 @@ fn flatten_value_into_gelf(
                         }),
                     _ => None,
                 };
+                // Actor and Target are not really lists: each entry is one claim about a
+                // single identity, keyed by Type. Collapsing them positionally produced a
+                // joined string that could neither be matched ("Actor_ID:<one upn>" returns
+                // nothing, because the stored value is the whole join) nor aggregated (every
+                // bucket is a *combination* of identities). Keying by the type gives
+                // Actor_UPN and Actor_Claim, which do both, and makes the field independent
+                // of the order Microsoft happened to emit the claims in.
+                if named.is_none() {
+                    if let Some((id, type_value)) = identity_claim(item) {
+                        let field = format!("{}_{}", prefix, identity_type_name(type_value));
+                        flatten_value_into_gelf(id, &field, gelf, array_depth + 1);
+                        // Several claims can share a type (Type 2, "Other", is a catch-all),
+                        // so the array still needs its _json and _count companions.
+                        any_collapsed = true;
+                        continue;
+                    }
+                }
                 match (named, item) {
                     (Some(name), Value::Object(m)) => {
                         // Promote directly as a top-level GELF field, dropping the container
@@ -421,6 +438,40 @@ fn flatten_value_into_gelf(
         other => {
             insert_or_append(gelf, prefix, Value::String(other.to_string()), array_depth);
         }
+    }
+}
+
+/// An `{"ID": ..., "Type": ...}` entry, as used by Actor and Target.
+///
+/// Requires exactly those two keys (OData annotations aside) so that an ordinary object
+/// which happens to carry an `ID` and a `Type` is not mistaken for an identity claim.
+fn identity_claim(item: &Value) -> Option<(&Value, &Value)> {
+    let map = item.as_object()?;
+    let significant = map.keys().filter(|k| !is_odata_annotation(k)).count();
+    if significant != 2 {
+        return None;
+    }
+    Some((map.get("ID")?, map.get("Type")?))
+}
+
+/// Name for an Office 365 `Identity` type, used as the field-name suffix for a claim.
+///
+/// Verified against live records: 0 is always the Entra object GUID, 5 always the UPN,
+/// 1 an application display name, 2 a catch-all of GUIDs and free text. Unknown values
+/// keep their number so a new enum member still lands in a stable, predictable field.
+fn identity_type_name(type_value: &Value) -> String {
+    match type_value.as_u64() {
+        Some(0) => "Claim".to_string(),
+        Some(1) => "Name".to_string(),
+        Some(2) => "Other".to_string(),
+        Some(3) => "PUID".to_string(),
+        Some(4) => "SID".to_string(),
+        Some(5) => "UPN".to_string(),
+        Some(other) => format!("Type{}", other),
+        None => match type_value.as_str().map(sanitize_field_segment) {
+            Some(name) if !name.is_empty() => name,
+            _ => "Type".to_string(),
+        },
     }
 }
 
@@ -1162,32 +1213,80 @@ mod tests {
         assert_eq!(parsed["_AffectedItems_ParentFolder"], "Inbox");
     }
 
-    /// Collapsed arrays accumulate: one value stays scalar, distinct values become a
-    /// multi-value field, and repeats are dropped rather than inflating the message.
+    /// Collapsed arrays accumulate: distinct values join, repeats are dropped, and a
+    /// single value stays a plain scalar.
     #[test]
     fn gelf_message_accumulates_collapsed_array_values() {
         let mut log = make_log("FileAccessed", "2026-09-22T11:18:13");
-        log.insert("Actor".to_string(), serde_json::json!([
-            {"ID": "alice@example.com", "Type": 5},
-            {"ID": "bob@example.com",   "Type": 5},
-            {"ID": "alice@example.com", "Type": 0},
+        log.insert("Shares".to_string(), serde_json::json!([
+            {"SiteUrl": "https://a", "Role": 5},
+            {"SiteUrl": "https://b", "Role": 5},
+            {"SiteUrl": "https://a", "Role": 0},
         ]));
-        log.insert("Target".to_string(), serde_json::json!([{"ID": "only-one"}]));
+        log.insert("Folders".to_string(), serde_json::json!([{"Path": "only-one"}]));
         let parsed: Value = serde_json::from_str(
             &build_gelf_message(&log, "h").unwrap()).unwrap();
 
-        // distinct values accumulate in order, duplicates collapse
-        assert_eq!(parsed["_Actor_ID"], "alice@example.com; bob@example.com");
+        assert_eq!(parsed["_Shares_SiteUrl"], "https://a; https://b");
         // Numbers from inside an array are written as text even when they collapse to one
         // value, so the field cannot flip between long and keyword across documents.
-        assert_eq!(parsed["_Actor_Type"], "5; 0");
-        assert_eq!(parsed["_Target_ID"], "only-one");
-        assert!(parsed["_Target_ID"].is_string(), "single-element arrays are still text");
-        // The original array is preserved verbatim so the element pairing is not lost.
-        assert!(parsed["_Actor_json"].as_str().unwrap().contains("bob@example.com"));
-        // ...but only where something actually collapsed and there was more than one element.
-        assert!(parsed.get("_Target_json").is_none(),
+        assert_eq!(parsed["_Shares_Role"], "5; 0");
+        assert_eq!(parsed["_Folders_Path"], "only-one");
+        assert!(parsed["_Folders_Path"].is_string(), "single-element arrays are still text");
+        assert!(parsed["_Shares_json"].as_str().unwrap().contains("https://b"));
+        assert!(parsed.get("_Folders_json").is_none(),
             "a single-element array has no ordering worth preserving");
+    }
+
+    /// Actor and Target entries are claims about one identity, keyed by Type. Keying the
+    /// field by the type is what makes them matchable and aggregatable: the old joined
+    /// Actor_ID could not be matched against a single UPN, and aggregating it bucketed by
+    /// *combination* of identities rather than by identity.
+    #[test]
+    fn gelf_message_keys_identity_claims_by_type() {
+        let mut log = make_log("Add group.", "2026-09-22T11:18:13");
+        log.insert("auditData".to_string(), serde_json::json!({
+            "Actor": [
+                {"ID": "6275b706-fc76-436f-bff6-be9ae4023015", "Type": 0,
+                 "Type@odata.type": "#Int64"},
+                {"ID": "kovalik.ext@example.com", "Type": 5},
+            ],
+            "Target": [
+                {"ID": "Microsoft.Azure.SyncFabric", "Type": 1},
+                {"ID": "ServicePrincipal", "Type": 2},
+                {"ID": "NotAgentic", "Type": 2},
+            ],
+        }));
+        let parsed: Value = serde_json::from_str(
+            &build_gelf_message(&log, "h").unwrap()).unwrap();
+
+        assert_eq!(parsed["_Actor_Claim"], "6275b706-fc76-436f-bff6-be9ae4023015");
+        assert_eq!(parsed["_Actor_UPN"], "kovalik.ext@example.com");
+        assert_eq!(parsed["_Target_Name"], "Microsoft.Azure.SyncFabric");
+        // Type 2 is a catch-all, so several claims can share it and still collapse.
+        assert_eq!(parsed["_Target_Other"], "ServicePrincipal; NotAgentic");
+        // The positional pair it replaces must be gone.
+        assert!(parsed.get("_Actor_ID").is_none() && parsed.get("_Actor_Type").is_none(),
+            "the joined ID/Type pair is replaced, not duplicated");
+        // The raw array is still kept for reconstruction.
+        assert!(parsed["_Actor_json"].as_str().unwrap().contains("kovalik.ext@example.com"));
+    }
+
+    /// An unknown Type must still land in a stable field rather than being dropped, and an
+    /// object that merely happens to carry an ID and a Type is not an identity claim.
+    #[test]
+    fn gelf_message_identity_promotion_is_conservative() {
+        let mut log = make_log("Add group.", "2026-09-22T11:18:13");
+        log.insert("Actor".to_string(), serde_json::json!([{"ID": "x", "Type": 97}]));
+        log.insert("Items".to_string(), serde_json::json!([
+            {"ID": "i-1", "Type": 5, "Subject": "not an identity"},
+        ]));
+        let parsed: Value = serde_json::from_str(
+            &build_gelf_message(&log, "h").unwrap()).unwrap();
+
+        assert_eq!(parsed["_Actor_Type97"], "x", "unknown enum members keep their number");
+        assert_eq!(parsed["_Items_ID"], "i-1", "a third field means it is a normal object");
+        assert_eq!(parsed["_Items_Subject"], "not an identity");
     }
 
     /// A bulk delete is what ransomware looks like in an audit feed, so the number of
