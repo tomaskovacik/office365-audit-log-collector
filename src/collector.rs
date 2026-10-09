@@ -304,8 +304,25 @@ impl Collector {
         self.known_blobs
             .insert(content.content_id.clone(), content.expiration.clone());
         if let Ok(logs) = serde_json::from_str::<JsonList>(&msg) {
-            let amount = logs.len();
+            let mut amount = 0;
             for log in logs {
+                // Remembering the blob is not enough. The Office Management API returns the
+                // same audit record inside several different content blobs, so every blob is
+                // new to us while its records are not: measured against a live tenant, one
+                // record was delivered 12 times, once for each run whose collection window
+                // still contained it. Skip records we have already handed to the outputs.
+                if let Some(record_id) = Self::management_record_id(&log) {
+                    if self.config.collect.skip_known_logs.unwrap_or(true)
+                        && self.known_blobs.contains_key(&record_id)
+                    {
+                        continue;
+                    }
+                    // Expire the record alongside the blob that carried it; the API stops
+                    // offering a blob once it expires, so it cannot be re-delivered after.
+                    self.known_blobs
+                        .insert(record_id, content.expiration.clone());
+                }
+                amount += 1;
                 self.handle_log(log, &content).await;
             }
             amount
@@ -525,6 +542,17 @@ impl Collector {
             );
         }
         Ok(())
+    }
+
+    /// Identify one Office Management API audit record.
+    ///
+    /// Every record carries a tenant-unique `Id`; a record without one cannot be deduplicated
+    /// and is delivered rather than silently dropped.
+    fn management_record_id(log: &ArbitraryJson) -> Option<String> {
+        log.get("Id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
     }
 
     /// Process a single time window's graph log records and immediately flush them to
@@ -910,4 +938,63 @@ async fn check_done(state: &mut Arc<Mutex<RunState>>) -> bool {
     let types = state.lock().await.awaiting_content_types;
     let blobs = state.lock().await.awaiting_content_blobs;
     types == 0 && blobs == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn record(id: &str) -> ArbitraryJson {
+        let mut m = ArbitraryJson::new();
+        m.insert("Id".to_string(), json!(id));
+        m.insert("Operation".to_string(), json!("UserLoggedIn"));
+        m
+    }
+
+    #[test]
+    fn management_record_id_reads_the_audit_record_id() {
+        assert_eq!(
+            Collector::management_record_id(&record("8212765b-d841-4ce9-b541-10d9534dec00")),
+            Some("8212765b-d841-4ce9-b541-10d9534dec00".to_string())
+        );
+    }
+
+    /// A record with no usable Id cannot be deduplicated, and must be delivered rather than
+    /// dropped -- losing an audit record is worse than delivering it twice.
+    #[test]
+    fn management_record_id_is_none_when_unusable() {
+        let mut no_id = ArbitraryJson::new();
+        no_id.insert("Operation".to_string(), json!("UserLoggedIn"));
+        assert_eq!(Collector::management_record_id(&no_id), None);
+
+        let mut empty = ArbitraryJson::new();
+        empty.insert("Id".to_string(), json!(""));
+        assert_eq!(Collector::management_record_id(&empty), None);
+
+        let mut numeric = ArbitraryJson::new();
+        numeric.insert("Id".to_string(), json!(42));
+        assert_eq!(Collector::management_record_id(&numeric), None);
+    }
+
+    /// The Office Management API returns the same audit record inside several different
+    /// content blobs. Each blob is new, so blob-level deduplication lets the record through
+    /// every time; only remembering the record itself stops the re-delivery.
+    #[test]
+    fn a_record_seen_in_an_earlier_blob_is_recognised() {
+        let mut known: HashMap<String, String> = HashMap::new();
+        let first = record("rec-1");
+        let id = Collector::management_record_id(&first).unwrap();
+        assert!(!known.contains_key(&id), "not seen yet");
+        known.insert(id.clone(), "2026-10-15T06:15:48.224Z".to_string());
+
+        // same record, arriving inside a different blob on a later run
+        let again = record("rec-1");
+        let id_again = Collector::management_record_id(&again).unwrap();
+        assert!(known.contains_key(&id_again), "must be recognised across blobs");
+
+        // a genuinely new record is not suppressed
+        let other = record("rec-2");
+        assert!(!known.contains_key(&Collector::management_record_id(&other).unwrap()));
+    }
 }
