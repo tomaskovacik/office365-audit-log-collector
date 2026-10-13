@@ -66,6 +66,26 @@ If you have any issues or questions, or requests for additional interfaces, feel
 Feel free to contribute other outputs if you happen to build any. Also open to any other useful pull requests!
 See the following link for more info on the management APIs: https://msdn.microsoft.com/en-us/office-365/office-365-management-activity-api-reference.
 
+### Alerting on the collected logs
+
+This collector gets the logs in. If you want to be alerted on them, see
+[microsoft365-graylog-alerts](https://github.com/tomaskovacik/microsoft365-graylog-alerts):
+29 Graylog event definitions as an importable content pack, covering mail forwarding,
+MFA method changes, admin consent, role assignments, sign-ins from unexpected countries,
+collector liveness and more.
+
+Its README also documents several non-obvious failure modes of alerting on this data —
+most of which fail *silently*, where the alert does not error, it simply never fires.
+The two most likely to catch you out:
+
+- Message `timestamp` is the Office 365 `CreationTime`, so a Graylog aggregation window
+  measures **event time**, not arrival time. A window shorter than your publishing lag
+  never fires at all.
+- Office 365 sends `ListBaseType` and `RequestType` with inconsistent types, and
+  OpenSearch rejects the **entire document** when a value does not parse as the mapped
+  type — so you lose whole audit records, visible only under
+  *System > Overview > Indexer failures*. The `stringFields` option below exists for this.
+
 ## Use cases:
 
 - Ad-lib log retrieval;
