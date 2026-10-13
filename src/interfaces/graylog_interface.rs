@@ -28,9 +28,20 @@ const DEFAULT_SPLIT_ARRAYS: [&str; 4] =
     ["FolderItems", "AffectedItems", "MessageItems", "Folders"];
 
 /// Fields coerced to text because Office 365 sends them with an inconsistent type.
-/// `ListBaseType` is `1` on a `FileAccessed` record and `"DocumentLibrary"` on a
-/// `ListViewed` one; a scan of 2422 live records found no other field that varies.
-const DEFAULT_STRING_FIELDS: [&str; 1] = ["ListBaseType"];
+///
+/// This matters more than it looks: OpenSearch infers a field's type from the first
+/// value it sees in an index, and then rejects the **entire document** when a later
+/// value will not parse as that type. One inconsistent field therefore silently
+/// drops whole audit records.
+///
+/// * `ListBaseType` is `1` on a `FileAccessed` record and `"DocumentLibrary"` on a
+///   `ListViewed` one.
+/// * `RequestType` is numeric on some sign-in records and a string elsewhere
+///   (`"OAuth2:Authorize"`, `"Login:login"`, `"SAS:EndAuth"`). Observed in
+///   production rejecting 602 documents in a single 7-day backfill.
+///
+/// A scan of 2422 live records found no other field that varies this way.
+const DEFAULT_STRING_FIELDS: [&str; 2] = ["ListBaseType", "RequestType"];
 
 pub struct GraylogInterface {
     address: String,
@@ -1467,5 +1478,40 @@ mod tests {
             &build_gelf_messages(&log, "h", &split_keys(), &custom).unwrap()[0]).unwrap();
         assert_eq!(v["_Version"], "2");
         assert!(v["_ListBaseType"].is_number(), "not on the custom list");
+    }
+
+    #[test]
+    fn gelf_default_string_fields_cover_both_inconsistent_types() {
+        // Both defaults must coerce, whichever type Microsoft happened to send.
+        // A mismatch here makes OpenSearch reject the whole document, not just
+        // the field, so these two are the difference between having an audit
+        // record and silently not having it.
+        let mut numeric = make_log("UserLoggedIn", "2026-10-13T12:35:47");
+        numeric.insert(
+            "auditData".to_string(),
+            serde_json::json!({"ListBaseType": 1, "RequestType": 4}),
+        );
+        let v: Value = serde_json::from_str(
+            &build_gelf_messages(&numeric, "h", &split_keys(), &string_fields()).unwrap()[0],
+        )
+        .unwrap();
+        assert_eq!(v["_ListBaseType"], "1");
+        assert_eq!(v["_RequestType"], "4");
+
+        // The string form must survive untouched rather than being re-quoted.
+        let mut textual = make_log("UserLoggedIn", "2026-10-13T12:35:47");
+        textual.insert(
+            "auditData".to_string(),
+            serde_json::json!({
+                "ListBaseType": "DocumentLibrary",
+                "RequestType": "OAuth2:Authorize"
+            }),
+        );
+        let v2: Value = serde_json::from_str(
+            &build_gelf_messages(&textual, "h", &split_keys(), &string_fields()).unwrap()[0],
+        )
+        .unwrap();
+        assert_eq!(v2["_ListBaseType"], "DocumentLibrary");
+        assert_eq!(v2["_RequestType"], "OAuth2:Authorize");
     }
 }

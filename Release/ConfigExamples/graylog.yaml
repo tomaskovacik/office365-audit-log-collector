@@ -13,6 +13,24 @@ output:
     # format: gelf   # Send GELF (Graylog Extended Log Format) to a Graylog GELF UDP input. No extractor needed.
     # host: office365-audit-collector  # Value used as the GELF 'host' field (only relevant when format is gelf).
     #
+    # --- GELF tuning (both optional; shown with their defaults) ---
+    #
+    # splitArrays: ["FolderItems", "AffectedItems", "MessageItems", "Folders"]
+    #   Emit one message per array item instead of positional field names
+    #   (FolderItems_0_..., FolderItems_1_...), which keeps the field count bounded.
+    #
+    # stringFields: ["ListBaseType", "RequestType"]
+    #   Always send these as text. OpenSearch infers a field's type from the first value
+    #   it sees and then rejects the ENTIRE document when a later value will not parse as
+    #   that type, so one inconsistent field silently drops whole audit records.
+    #   ListBaseType is 1 on FileAccessed but "DocumentLibrary" on ListViewed;
+    #   RequestType is numeric on some sign-ins and a string elsewhere
+    #   ("OAuth2:Authorize", "Login:login", "SAS:EndAuth").
+    #   Check System -> Overview -> Indexer failures if documents go missing.
+    #
+    #   CAREFUL: supplying the list REPLACES the default, it does not extend it.
+    #   stringFields: ["RequestType"] silently removes the ListBaseType protection.
+    #
     # NOTE: When using format: gelf, Office 365 audit logs contain many nested fields that are flattened into
     # individual OpenSearch fields. The default OpenSearch field limit (1000) can be exceeded. To raise it,
     # apply an index template via the OpenSearch API.
@@ -20,6 +38,14 @@ output:
     # PREREQUISITE: The index template below uses the pattern "o365_*". For it to take effect, messages from
     # this collector must be routed to a Graylog index set whose index prefix is "o365_".
     # Configure this in Graylog under System -> Streams -> assign the stream to an index set with prefix "o365_".
+    #
+    # WARNING: the pattern must match your real index names, separator included. Graylog names
+    # indices "<prefix>_<n>", so a prefix of "o365-" produces "o365-_0", "o365-_1", ... which the
+    # pattern "o365_*" does NOT match. The template is then created successfully, applies to
+    # nothing, and the index silently stays at the 1000-field default. Verify with:
+    #   curl -k --cert ./cert.crt --key ./key.key \
+    #        "https://<opensearch-host>:9200/_cat/indices/o365*?h=index"
+    # and make the pattern match what you actually see (e.g. "o365-*").
     #
     # Step 1: Obtain client certificates from the Graylog UI:
     #   System -> Cluster Configuration -> Certificate Management -> Generate client certificate
@@ -46,6 +72,9 @@ output:
     #            },
     #            "priority": 100
     #          }'
+    #
+    # Also consider "index.mapping.total_fields.limit" together with splitArrays above: splitting
+    # arrays keeps field names bounded, which is the cause of most field-limit breaches here.
     #
     # NOTE: The mappings above fix the "timestamp" field type. If you previously used format: raw,
     # the timestamp field may already be mapped as "text" in the current index, causing aggregation

@@ -299,6 +299,48 @@ the `port` value above (e.g. `12201`). No extractor configuration is needed.
 > **Tip:** If you prefer TCP, set `protocol: tcp` in the collector config and use a **GELF TCP**
 > input in Graylog instead.
 
+##### GELF tuning options
+
+Two optional settings control how nested audit data is turned into Graylog fields. Both have
+sensible defaults, so you only need them if your tenant produces something the defaults do not
+cover.
+
+```yaml
+output:
+  graylog:
+    format: gelf
+    # One message per array item instead of positional field names.
+    # Default: FolderItems, AffectedItems, MessageItems, Folders
+    splitArrays: ["FolderItems", "AffectedItems", "MessageItems", "Folders"]
+    # Fields always sent as text, whatever type Microsoft used.
+    # Default: ListBaseType, RequestType
+    stringFields: ["ListBaseType", "RequestType"]
+```
+
+**`stringFields` exists to prevent silent data loss.** OpenSearch infers a field's type from the
+first value it sees in an index and then rejects the **entire document** if a later value will not
+parse as that type — you lose the whole audit record, not just the field. Office 365 sends a few
+fields with inconsistent types: `ListBaseType` is `1` on a `FileAccessed` record but
+`"DocumentLibrary"` on a `ListViewed` one, and `RequestType` is numeric on some sign-in records and
+a string elsewhere (`"OAuth2:Authorize"`, `"Login:login"`, `"SAS:EndAuth"`). In production a single
+7-day backfill lost 602 documents to `RequestType` alone, visible only in
+**System > Overview > Indexer failures**.
+
+> **Careful:** supplying either list *replaces* the default, it does not add to it. Writing
+> `stringFields: ["RequestType"]` silently removes the `ListBaseType` protection. Always include
+> the defaults you still want.
+
+**`splitArrays`** fans a record containing an array out into one message per item, preserving the
+parent fields on each. Without it, an array of 40 mail items becomes 40 numbered field names
+(`FolderItems_0_...`), which inflates the field count and can breach the field limit described
+below. `Folders` is deliberately listed last so that Sync records fall through to per-folder
+messages.
+
+Both problems can also be fixed Graylog-side without touching the collector, which is useful when
+the records are already in your index: **System > Indices > _your index set_ > Field Types >
+Change field type**, pinning the field to `string`. That applies to newly created indices only, so
+rotate the active write index afterwards.
+
 ---
 
 #### Option B — Raw JSON format (default, extractor required)
